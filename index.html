@@ -667,16 +667,124 @@ function prodQuery(cols, opts){
   if (t) qb = qb.or('sku.ilike.%' + t + '%,name.ilike.%' + t + '%');
   return qb.order('sku');
 }
+var SEL = {};          // สินค้าที่ติ๊กเลือก (id -> true) คงอยู่ข้ามหน้า
+var PPG = 0;
+function selCount(){ return Object.keys(SEL).length; }
 async function loadProducts(pg){
+  PPG = pg;
   var r = await qc(prodQuery('*', {count:'exact'}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
   await loadUnits(r.data.map(function(x){ return x.id; }));
-  $h('p-res').innerHTML = '<table><tr><th>สินค้า</th><th>หมวด</th><th>หน่วย</th><th class="num">ต้นทุน</th><th class="num">ราคาขาย</th><th class="num">จุดสั่งซื้อ</th><th></th></tr>' +
+  var mgr = isMgr(), allOn = r.data.length && r.data.every(function(p){ return SEL[p.id]; });
+  $h('p-res').innerHTML = (mgr ? '<div class="row" id="p-selbar" style="margin-bottom:10px;align-items:center"></div>' : '') +
+    '<table><tr>' + (mgr ? '<th style="width:34px"><input type="checkbox" title="เลือกทั้งหน้า" onclick="selPage(this.checked)"' + (allOn ? ' checked' : '') + '></th>' : '') +
+    '<th>สินค้า</th><th>หมวด</th><th>หน่วย</th><th class="num">ต้นทุน</th><th class="num">ราคาขาย</th><th class="num">จุดสั่งซื้อ</th><th></th></tr>' +
     (r.data.length ? r.data.map(function(p){
-      var units = (PU[p.id] || []).map(function(u){ return esc(u.name) + (u.factor !== 1 ? '=' + num(u.factor) : ''); }).join(', ');
-      return '<tr' + (isMgr() ? ' class="click" onclick="editProduct(' + p.id + ')"' : '') + '><td>' + pcell(p.image_url, esc(p.name) + (p.active ? '' : ' <span class="b b-x">ปิดใช้งาน</span>'), esc(p.sku)) + '</td><td>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') +
+      var units = (PU[p.id] || []).map(function(u){ return (u.unit_id === p.base_unit_id ? '<b>' + esc(u.name) + '</b>' : esc(u.name)) + (u.factor !== 1 ? '=' + num(u.factor) : ''); }).join(', ');
+      return '<tr' + (mgr ? ' class="click" onclick="editProduct(' + p.id + ')"' : '') + '>' +
+        (mgr ? '<td onclick="event.stopPropagation()"><input type="checkbox" class="psel" data-id="' + p.id + '"' + (SEL[p.id] ? ' checked' : '') + ' onclick="selOne(' + p.id + ',this.checked)"></td>' : '') +
+        '<td>' + pcell(p.image_url, esc(p.name) + (p.active ? '' : ' <span class="b b-x">ปิดใช้งาน</span>'), esc(p.sku)) + '</td><td>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') +
         '</td><td>' + units + '</td><td class="num">' + money(p.cost) + '</td><td class="num">' + money(p.price) + '</td><td class="num">' + (Number(p.min_qty) ? num(p.min_qty) : '-') + '</td>' +
         '<td><button class="btn sm" onclick="event.stopPropagation();stockCard(' + p.id + ',' + S.cur + ')">สต๊อก</button></td></tr>';
-    }).join('') : '<tr><td colspan="7" class="empty">ไม่พบสินค้า</td></tr>') + '</table>' + pager(r.count, pg, 'loadProducts');
+    }).join('') : '<tr><td colspan="8" class="empty">ไม่พบสินค้า</td></tr>') + '</table>' + pager(r.count, pg, 'loadProducts');
+  if (mgr) selBar(r.count);
+}
+function selBar(total){
+  var el = $('p-selbar'); if (!el) return; var n = selCount();
+  if (total != null) el.dataset.total = total;
+  el.innerHTML = n ? '<b>เลือกแล้ว ' + num(n, 0) + ' รายการ</b><button class="btn pri sm" onclick="openBulkEdit()">แก้ไขหลายรายการ</button><button class="btn sm" onclick="selClear()">ล้างการเลือก</button>' +
+      '<button class="btn sm ghost" onclick="selAllMatching()">เลือกทั้งหมดที่ค้นหาได้ (' + num(el.dataset.total, 0) + ')</button>'
+    : '<span class="sub">ติ๊กช่องหน้าสินค้าเพื่อแก้ไขหลายรายการพร้อมกัน (ย้ายหมวด เปลี่ยนหน่วย ฯลฯ)</span>' +
+      (Number(el.dataset.total) ? '<button class="btn sm ghost" onclick="selAllMatching()">เลือกทั้งหมดที่ค้นหาได้ (' + num(el.dataset.total, 0) + ')</button>' : '');
+}
+function selOne(id, on){ if (on) SEL[id] = true; else delete SEL[id]; selBar(); }
+function selPage(on){ document.querySelectorAll('.psel').forEach(function(c){ c.checked = on; if (on) SEL[c.dataset.id] = true; else delete SEL[c.dataset.id]; }); selBar(); }
+function selClear(){ SEL = {}; document.querySelectorAll('.psel').forEach(function(c){ c.checked = false; }); loadProducts(PPG); }
+async function selAllMatching(){
+  await busy(async function(){
+    var rows = await fetchAll(function(){ return prodQuery('id'); });
+    rows.forEach(function(r){ SEL[r.id] = true; });
+    toast('เลือก ' + rows.length + ' รายการ'); await loadProducts(PPG);
+  });
+}
+// ---------- แก้ไขหลายรายการ ----------
+function openBulkEdit(){
+  var n = selCount(); if (!n) return;
+  var unitSel = function(id, blank){ return '<select id="' + id + '">' + (blank ? '<option value="">' + blank + '</option>' : '') + unitOptions('') + '</select>'; };
+  openModal('<h2>แก้ไข ' + num(n, 0) + ' รายการพร้อมกัน</h2>' +
+    '<label class="f">ต้องการทำอะไร <select id="bk-act" onchange="bulkForm()">' +
+      '<option value="cat">ย้ายหมวดหมู่</option>' +
+      '<option value="big">เพิ่ม / แก้หน่วยใหญ่ (เช่น ลัง = 10 แพ็ค)</option>' +
+      '<option value="delunit">ลบหน่วยรองออก</option>' +
+      '<option value="base">เปลี่ยนหน่วยฐาน (เฉพาะสินค้าที่ยังไม่มีการเคลื่อนไหว)</option>' +
+      '<option value="min">ตั้งจุดสั่งซื้อ</option>' +
+      '<option value="active">เปิด / ปิดใช้งาน</option></select></label>' +
+    '<div id="bk-form" style="margin-top:12px"></div>' +
+    '<div class="row end"><button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn pri" onclick="runBulkEdit()">ดำเนินการ</button></div>');
+  BK_UNITSEL = unitSel; bulkForm();
+}
+var BK_UNITSEL = null;
+function bulkForm(){
+  var a = $('bk-act').value, f = $('bk-form');
+  if (a === 'cat') f.innerHTML = '<label class="f">ย้ายไปหมวด <select id="bk-cat">' + catOptions('', '— ไม่ระบุหมวด —') + '</select></label>';
+  if (a === 'big') f.innerHTML = '<div class="row"><label class="f">หน่วย ' + BK_UNITSEL('bk-unit') + '</label><label class="f">เท่ากับกี่หน่วยฐาน <input id="bk-factor" type="number" min="0" step="any" placeholder="เช่น 10"></label></div>' +
+    '<p class="sub">ถ้าสินค้าใดมีหน่วยนี้อยู่แล้วจะแก้ตัวคูณให้ใหม่ บาร์โค้ดเดิมยังอยู่ · ข้ามสินค้าที่หน่วยนี้เป็นหน่วยฐาน</p>';
+  if (a === 'delunit') f.innerHTML = '<label class="f">ลบหน่วย ' + BK_UNITSEL('bk-unit') + '</label><p class="sub">ลบเฉพาะหน่วยรอง (หน่วยฐานลบไม่ได้) ประวัติเดิมไม่หาย บาร์โค้ดของหน่วยนั้นจะใช้ไม่ได้อีก</p>';
+  if (a === 'base') f.innerHTML = '<label class="f">หน่วยฐานใหม่ ' + BK_UNITSEL('bk-unit') + '</label>' +
+    '<p class="hint">ใช้ได้เฉพาะสินค้าที่ยังไม่เคยรับเข้า/จ่ายออก ตัวไหนมีการเคลื่อนไหวแล้วระบบจะข้ามและแจ้งชื่อให้ · ' +
+    'ตัวคูณของหน่วยอื่นยังเป็นตัวเลขเดิม (เช่น ลัง = 10) ตรวจให้ถูกกับหน่วยฐานใหม่ด้วย · หน่วยฐานเดิมจะถูกลบออก และบาร์โค้ดของมันย้ายมาที่หน่วยฐานใหม่ (ถ้าหน่วยใหม่ยังไม่มีบาร์โค้ด)</p>';
+  if (a === 'min') f.innerHTML = '<label class="f">จุดสั่งซื้อ (หน่วยฐาน) <input id="bk-min" type="number" min="0" step="any" placeholder="0 = ไม่แจ้งเตือน"></label>';
+  if (a === 'active') f.innerHTML = '<label class="f">สถานะ <select id="bk-on"><option value="1">เปิดใช้งาน</option><option value="0">ปิดใช้งาน (ซ่อนจากการทำรายการ)</option></select></label>';
+}
+async function runBulkEdit(){
+  var a = $('bk-act').value, ids = Object.keys(SEL).map(Number);
+  var v = {cat: $('bk-cat') ? selNum('bk-cat') : null, unit: $('bk-unit') ? Number($('bk-unit').value) : null,
+    factor: $('bk-factor') ? Number($('bk-factor').value) : null, min: $('bk-min') ? Number($('bk-min').value || 0) : null, on: $('bk-on') ? $('bk-on').value === '1' : null};
+  if (a === 'big' && !(v.factor > 0)) return toast('ใส่จำนวนหน่วยฐานต่อหน่วยใหญ่ให้มากกว่า 0', 'bad');
+  if (a === 'min' && v.min < 0) return toast('จุดสั่งซื้อต้องไม่ติดลบ', 'bad');
+  var label = $('bk-act').selectedOptions[0].textContent;
+  if (!confirm(label + '\nกับสินค้า ' + ids.length + ' รายการ ?')) return;
+  closeModal();
+  await busy(async function(){
+    var prods = [];
+    for (var i = 0; i < ids.length; i += 150) prods = prods.concat(await q(sb.from('products').select('*').in('id', ids.slice(i, i + 150))));
+    ids.forEach(function(id){ delete PU[id]; }); await loadUnits(ids);
+    var ok = 0, skip = [], errs = [];
+    for (var k = 0; k < prods.length; k++) {
+      var p = prods[k], units = (PU[p.id] || []).map(function(u){ return {unit_id:u.unit_id, factor:u.factor, barcode:u.barcode || ''}; });
+      var obj = {id:p.id, sku:p.sku, name:p.name, category_id:p.category_id, base_unit_id:p.base_unit_id, cost:p.cost, price:p.price,
+        min_qty:p.min_qty, note:p.note, active:p.active, units:units};
+      $('loading').textContent = 'กำลังแก้ไข ' + (k + 1) + ' / ' + prods.length;
+      if (a === 'cat') obj.category_id = v.cat;
+      if (a === 'min') obj.min_qty = v.min;
+      if (a === 'active') obj.active = v.on;
+      if (a === 'big') {
+        if (v.unit === p.base_unit_id) { skip.push(p.sku + ' (เป็นหน่วยฐานอยู่แล้ว)'); continue; }
+        var ex = units.find(function(u){ return u.unit_id === v.unit; });
+        if (ex) ex.factor = v.factor; else units.push({unit_id:v.unit, factor:v.factor, barcode:''});
+      }
+      if (a === 'delunit') {
+        if (v.unit === p.base_unit_id) { skip.push(p.sku + ' (เป็นหน่วยฐาน)'); continue; }
+        if (!units.some(function(u){ return u.unit_id === v.unit; })) { skip.push(p.sku + ' (ไม่มีหน่วยนี้)'); continue; }
+        obj.units = units.filter(function(u){ return u.unit_id !== v.unit; });
+      }
+      if (a === 'base') {
+        if (v.unit === p.base_unit_id) { skip.push(p.sku + ' (เป็นหน่วยนี้อยู่แล้ว)'); continue; }
+        var oldBase = units.find(function(u){ return u.unit_id === p.base_unit_id; }) || {barcode:''};
+        var had = units.find(function(u){ return u.unit_id === v.unit; });   // ถ้าหน่วยใหม่มีอยู่แล้ว ใช้บาร์โค้ดของมันเอง
+        obj.base_unit_id = v.unit;
+        obj.units = [{unit_id:v.unit, factor:1, barcode:had ? (had.barcode || '') : (oldBase.barcode || '')}].concat(units.filter(function(u){ return u.unit_id !== p.base_unit_id && u.unit_id !== v.unit; }));
+      }
+      try { await q(sb.rpc('save_product', {p: obj})); ok++; delete PU[p.id]; }
+      catch(e){ errs.push(p.sku + ' ' + p.name + ': ' + errMsg(e)); }
+    }
+    $('loading').textContent = 'กำลังทำงาน...';
+    openModal('<h2>ผลการแก้ไขหลายรายการ</h2><p>สำเร็จ ' + ok + ' รายการ' + (skip.length ? ', ข้าม ' + skip.length : '') + (errs.length ? ', ไม่สำเร็จ ' + errs.length : '') + '</p>' +
+      (errs.length || skip.length ? '<div class="tbl-wrap"><table>' + errs.map(function(e){ return '<tr><td class="low">' + esc(e) + '</td></tr>'; }).join('') +
+        skip.map(function(e){ return '<tr><td class="sub">ข้าม: ' + esc(e) + '</td></tr>'; }).join('') + '</table></div>' : '') +
+      '<div class="row end"><button class="btn" onclick="selClear();closeModal()">ล้างการเลือก</button><button class="btn pri" onclick="closeModal()">ตกลง</button></div>');
+    if ($('p-res')) loadProducts(PPG);
+  });
+  $('loading').textContent = 'กำลังทำงาน...';
 }
 var PF = null;
 async function editProduct(id){
