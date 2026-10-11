@@ -9,6 +9,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 <style>
 :root{
   --bg:#f3f4f6; --card:#fff; --ink:#1b2130; --muted:#667085; --line:#e2e5ea;
@@ -194,8 +195,8 @@ td input.qty{width:100px;text-align:right}
 // ============================================================
 //  ตั้งค่า: ใส่ค่าของโปรเจค Supabase ที่นี่ (หรือกรอกผ่านหน้าจอครั้งแรก)
 // ============================================================
-var SUPABASE_URL = 'https://qmkosjhjkhlurwmxngnp.supabase.co';
-var SUPABASE_KEY = 'sb_publishable_Am3hrXB2a1MhMxe0XhR3Tw_XGeYNAlF';
+var SUPABASE_URL = '';
+var SUPABASE_KEY = '';
 
 var PAGE_SIZE = 50;
 var TYPE = {IN:'รับเข้า', OUT:'จ่ายออก', TRANSFER:'โอนย้าย', ADJUST:'ปรับยอด', COUNT:'ตรวจนับ'};
@@ -624,7 +625,7 @@ async function stockCard(pid, branch){
 PAGES.products = async function(){
   page('<div class="ph"><h1>รายการสินค้า</h1><div class="row">' +
     (isMgr() ? '<button class="btn" onclick="downloadTemplate()">แม่แบบ Excel</button><label class="btn">นำเข้า Excel<input type="file" accept=".xlsx,.xls,.csv" class="hidden" onchange="importProducts(this.files[0]); this.value=\'\'"></label>' : '') +
-    '<button class="btn" onclick="exportProducts()">ส่งออก Excel</button>' +
+    '<button class="btn" onclick="openBarcodeModal()">พิมพ์บาร์โค้ด</button><button class="btn" onclick="exportProducts()">ส่งออก Excel</button>' +
     (isMgr() ? '<button class="btn pri" onclick="editProduct(null)">+ เพิ่มสินค้า</button>' : '') + '</div></div>' +
     '<div class="card"><div class="row"><label class="f grow">ค้นหา <input id="p-t" placeholder="รหัส หรือ ชื่อสินค้า"></label>' +
     '<label class="f">หมวดหมู่ <select id="p-cat">' + catOptions('') + '</select></label>' +
@@ -738,6 +739,105 @@ async function exportProducts(){
         'หน่วยใหญ่':big.name || '', 'จำนวนต่อหน่วยใหญ่':big.factor || '', 'บาร์โค้ดหน่วยใหญ่':big.barcode || '', 'สถานะ':p.active ? 'ใช้งาน' : 'ปิด'};
     }), 'สินค้า', 'products_' + today() + '.xlsx');
   });
+}
+// ============================================================
+//  พิมพ์บาร์โค้ด (สติกเกอร์ติดชั้นวาง / แผ่นรวมสำหรับสแกน)
+// ============================================================
+// บาร์โค้ดของร้าน: EAN-13 ขึ้นต้นด้วย 2 (ช่วงเลขสำหรับใช้ภายในร้าน) = 2 + รหัสหน่วย 3 หลัก + รหัสสินค้า 8 หลัก + เลขตรวจสอบ
+function ean13Check(d12){ var s = 0; for (var i = 0; i < 12; i++) s += Number(d12[i]) * (i % 2 ? 3 : 1); return String((10 - s % 10) % 10); }
+function shopCode(pid, uid){ var d = '2' + String(uid).padStart(3, '0').slice(-3) + String(pid).padStart(8, '0').slice(-8); return d + ean13Check(d); }
+function barcodeSvg(code, h){
+  var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  var fmt = /^\d{13}$/.test(code) && ean13Check(code.slice(0, 12)) === code[12] ? 'EAN13' : 'CODE128';
+  var opt = {format: fmt, height: h || 50, width: 2, margin: 4, fontSize: 16, displayValue: true};
+  try { JsBarcode(svg, code, opt); } catch(e){ opt.format = 'CODE128'; JsBarcode(svg, code, opt); }
+  var w = parseFloat(svg.getAttribute('width')), hh = parseFloat(svg.getAttribute('height'));
+  svg.setAttribute('viewBox', '0 0 ' + w + ' ' + hh); svg.removeAttribute('width'); svg.removeAttribute('height');
+  svg.removeAttribute('style'); svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  return svg.outerHTML;
+}
+function openBarcodeModal(){
+  openModal('<h2>พิมพ์บาร์โค้ด</h2>' +
+    '<div class="row"><label class="f">หมวดหมู่ <select id="bc-cat">' + catOptions($('p-cat') ? selNum('p-cat') : '', '— ทุกหมวด —') + '</select></label>' +
+    '<label class="f grow">รูปแบบ <select id="bc-fmt"><option value="label">สติกเกอร์ติดชั้นวาง (A4 แผ่นละ 24 ดวง)</option><option value="sheet">แผ่นรวมสำหรับสแกน (แปะไว้ที่จุดเบิกของ)</option></select></label></div>' +
+    '<div style="margin-top:14px;display:grid;gap:10px">' +
+    '<label class="chk"><input type="checkbox" id="bc-big" checked> รวมบาร์โค้ดหน่วยใหญ่ด้วย (เช่น ลัง)</label>' +
+    (isMgr() ? '<label class="chk"><input type="checkbox" id="bc-gen" checked> สร้างบาร์โค้ดของร้านให้หน่วยที่ยังไม่มีบาร์โค้ด และบันทึกลงสินค้าอัตโนมัติ</label>'
+             : '<p class="sub">สินค้าที่ยังไม่มีบาร์โค้ด จะพิมพ์เป็นรหัสสินค้าแทน (ผู้จัดการขึ้นไปสั่งสร้างบาร์โค้ดของร้านได้)</p>') +
+    '</div><p class="sub" style="margin-top:12px">ตอนสั่งพิมพ์ ให้ตั้งขนาดกระดาษ A4 และระยะขอบเป็น "ค่าเริ่มต้น" หรือ "ไม่มี" · สแกนป้ายหน่วยใหญ่ ระบบจะเลือกหน่วยลังให้เอง</p>' +
+    '<div class="row end"><button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn pri" onclick="printBarcodes()">สร้างหน้าพิมพ์</button></div>');
+}
+async function printBarcodes(){
+  if (!window.JsBarcode) return toast('โหลดตัวสร้างบาร์โค้ดไม่สำเร็จ ลองรีเฟรชหน้าเว็บ', 'bad');
+  var cat = selNum('bc-cat'), fmt = $('bc-fmt').value, big = $('bc-big').checked, gen = !!($('bc-gen') && $('bc-gen').checked);
+  var w = window.open('', '_blank');   // เปิดทันทีตอนกด เพื่อไม่ให้เบราว์เซอร์บล็อก
+  if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างใหม่ กรุณาอนุญาต pop-up ให้เว็บนี้', 'bad');
+  w.document.write('<p style="font-family:sans-serif;padding:24px">กำลังเตรียมบาร์โค้ด...</p>');
+  closeModal();
+  var ok = await busy(async function(){
+    var prods = await fetchAll(function(){ var qb = sb.from('products').select('*').eq('active', true).order('sku'); return cat ? qb.eq('category_id', cat) : qb; });
+    if (!prods.length) throw new Error('ไม่มีสินค้าในหมวดนี้');
+    var ids = prods.map(function(p){ return p.id; });
+    ids.forEach(function(id){ delete PU[id]; }); await loadUnits(ids);
+    var made = 0;
+    if (gen) {
+      var todo = prods.filter(function(p){ return PU[p.id].some(function(u){ return !u.barcode && (u.unit_id === p.base_unit_id || big); }); });
+      for (var i = 0; i < todo.length; i++) {
+        var p = todo[i];
+        $('loading').textContent = 'กำลังสร้างบาร์โค้ดของร้าน ' + (i + 1) + ' / ' + todo.length;
+        var units = PU[p.id].map(function(u){ return {unit_id:u.unit_id, factor:u.factor,
+          barcode: u.barcode || ((u.unit_id === p.base_unit_id || big) ? shopCode(p.id, u.unit_id) : '')}; });
+        await q(sb.rpc('save_product', {p: {id:p.id, sku:p.sku, name:p.name, category_id:p.category_id, base_unit_id:p.base_unit_id,
+          cost:p.cost, price:p.price, min_qty:p.min_qty, note:p.note, active:p.active, units:units}}));
+        delete PU[p.id]; made++;
+      }
+      $('loading').textContent = 'กำลังทำงาน...';
+      await loadUnits(todo.map(function(p){ return p.id; }));
+    }
+    var title = (cat ? S.catMap[cat].name : 'ทุกหมวด');
+    var body = '';
+    function unitLabel(p, u){ return esc(u.name) + (u.factor !== 1 ? ' (' + num(u.factor) + ' ' + esc(uname(p.base_unit_id)) + ')' : ''); }
+    function codesOf(p){
+      var list = PU[p.id] || [], base = list.find(function(u){ return u.unit_id === p.base_unit_id; }) || {name:uname(p.base_unit_id), factor:1};
+      var out = [{u:base, code:base.barcode || p.sku}];
+      if (big) list.forEach(function(u){ if (u.unit_id !== p.base_unit_id && u.barcode) out.push({u:u, code:u.barcode}); });
+      return out;
+    }
+    if (fmt === 'label') {
+      body = '<div class="grid">' + prods.map(function(p){
+        return codesOf(p).map(function(x){
+          return '<div class="lbl"><div class="n">' + esc(p.name) + '</div>' + barcodeSvg(x.code, 50) + '<div class="c">' + esc(p.sku) + ' · ' + unitLabel(p, x.u) + '</div></div>';
+        }).join('');
+      }).join('') + '</div>';
+    } else {
+      body = '<h1>แผ่นบาร์โค้ดสินค้า · ' + esc(title) + '</h1><p class="sub">สแกนบาร์โค้ดของหน่วยที่ต้องการ แล้วแก้จำนวนในระบบ</p><table><tr><th style="width:6%">#</th><th style="width:34%">สินค้า</th><th>บาร์โค้ด</th></tr>' +
+        prods.map(function(p, i){
+          return '<tr><td class="ct">' + (i + 1) + '</td><td><b>' + esc(p.name) + '</b><div class="sub">' + esc(p.sku) + '</div></td><td><div class="cells">' +
+            codesOf(p).map(function(x){ return '<div class="cell">' + barcodeSvg(x.code, 40) + '<div class="u">' + unitLabel(p, x.u) + '</div></div>'; }).join('') + '</div></td></tr>';
+        }).join('') + '</table>';
+    }
+    var css = '@page{size:A4;margin:8mm}*{box-sizing:border-box}body{margin:0;font-family:"IBM Plex Sans Thai",sans-serif;color:#000}' +
+      '.grid{display:grid;grid-template-columns:repeat(3,1fr)}' +
+      '.lbl{height:34.5mm;border:1px dashed #bbb;padding:2mm 3mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;overflow:hidden;break-inside:avoid}' +
+      '.lbl .n{font-size:10.5pt;font-weight:600;line-height:1.25;max-height:2.5em;overflow:hidden}' +
+      '.lbl svg{width:100%;height:17mm;margin:1mm 0}.lbl .c{font-size:8pt}' +
+      'h1{font-size:15pt;margin:0 0 2mm}.sub{font-size:9pt;color:#444}table{width:100%;border-collapse:collapse;margin-top:3mm}' +
+      'th,td{border:1px solid #888;padding:2mm;vertical-align:middle;font-size:10.5pt}th{background:#eee;text-align:left}tr{break-inside:avoid}.ct{text-align:center}' +
+      '.cells{display:flex;gap:4mm;flex-wrap:wrap}.cell{text-align:center}.cell svg{width:52mm;height:15mm}.u{font-size:8.5pt}' +
+      '.bar{position:sticky;top:0;background:#fff3cd;padding:8px 12px;font-size:14px;display:flex;gap:12px;align-items:center}' +
+      '@media print{.bar{display:none}.lbl{border-color:#ddd}}';
+    w.document.open();
+    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>บาร์โค้ด ' + esc(title) + '</title>' +
+      '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;600&display=swap" rel="stylesheet"><style>' + css + '</style></head><body>' +
+      '<div class="bar"><span>' + prods.length + ' สินค้า' + (made ? ' · สร้างบาร์โค้ดของร้านใหม่ ' + made + ' สินค้า' : '') + '</span><button onclick="window.print()">พิมพ์</button></div>' +
+      body + '<script>window.onload=function(){(document.fonts?document.fonts.ready:Promise.resolve()).then(function(){setTimeout(function(){window.print()},300)})}<\/script></body></html>');
+    w.document.close();
+    if (made) toast('สร้างบาร์โค้ดของร้านให้ ' + made + ' สินค้าแล้ว');
+    if (made && $('p-res')) loadProducts(0);
+    return true;
+  });
+  $('loading').textContent = 'กำลังทำงาน...';
+  if (!ok) { try { w.close(); } catch(e){} }
 }
 function downloadTemplate(){
   exportXlsx([{'รหัส':'A001', 'ชื่อสินค้า':'น้ำดื่ม 600 มล.', 'หมวดหมู่':'เครื่องดื่ม', 'หน่วยฐาน':'ขวด', 'บาร์โค้ด':'8850000000001',
