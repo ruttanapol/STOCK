@@ -72,6 +72,7 @@ tr.flash td{animation:flash 1s}
 @keyframes flash{from{background:#fff4d6}to{background:transparent}}
 td.empty{text-align:center;color:var(--muted);padding:28px}
 td input.qty{width:100px;text-align:right}
+input.qty:placeholder-shown{border-color:#f0b4ad;background:var(--bad-soft)}
 .low{color:var(--bad);font-weight:600}
 .okc{color:var(--ok);font-weight:600}
 .b{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
@@ -1165,7 +1166,7 @@ function renderTxnLines(){
   html += T.lines.length ? T.lines.map(function(l, i){
     return '<tr id="t-row-' + i + '"><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.sku), esc(l.name)) + '</td>' +
       '<td><select data-i="' + i + '" data-k="unit_id">' + (PU[l.pid] || []).map(function(u){ return '<option value="' + u.unit_id + '"' + (u.unit_id == l.unit_id ? ' selected' : '') + '>' + esc(u.name) + (u.factor !== 1 ? ' (' + num(u.factor) + ')' : '') + '</option>'; }).join('') + '</select></td>' +
-      '<td class="num"><input class="qty" type="number" step="any" data-i="' + i + '" data-k="qty" value="' + esc(l.qty) + '"></td>' +
+      '<td class="num"><input class="qty" type="number" step="any" placeholder="0" data-i="' + i + '" data-k="qty" value="' + esc(l.qty) + '" onfocus="this.select()" onclick="this.select()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();$(\'t-scan\').focus()}"></td>' +
       (cost ? '<td class="num"><input class="qty" type="number" step="any" data-i="' + i + '" data-k="cost" value="' + esc(l.cost == null ? '' : l.cost) + '" placeholder="-"></td>' : '') +
       '<td class="num" id="t-info-' + i + '"></td><td><button class="x" onclick="delTxnLine(' + i + ')">×</button></td></tr>';
   }).reverse().join('') : '<tr><td colspan="7" class="empty">ยังไม่มีรายการ — สแกนบาร์โค้ดหรือค้นหาสินค้าด้านบน</td></tr>';
@@ -1203,10 +1204,11 @@ async function addTxnLine(p, unitId){
   var uid = unitId || p.base_unit_id;
   var ex = T.lines.findIndex(function(l){ return l.pid === p.id && l.unit_id == uid; });
   if (ex >= 0) T.lines[ex].qty = Number(T.lines[ex].qty || 0) + 1;
-  else T.lines.push({pid:p.id, sku:p.sku, name:p.name, img:p.image_url || null, base_unit_id:p.base_unit_id, unit_id:uid, qty:1,
+  else T.lines.push({pid:p.id, sku:p.sku, name:p.name, img:p.image_url || null, base_unit_id:p.base_unit_id, unit_id:uid, qty:unitId ? 1 : '',
     unitCost:Number(p.cost) || null, cost:T.type === 'IN' && Number(p.cost) ? +(Number(p.cost) * factorOf(p.id, uid)).toFixed(2) : ''});
   beep(true); saveTxn(); renderTxnLines();
-  var row = $('t-row-' + (ex >= 0 ? ex : T.lines.length - 1)); if (row) row.classList.add('flash');
+  var row = $('t-row-' + (ex >= 0 ? ex : T.lines.length - 1));
+  if (row) { row.classList.add('flash'); if (!unitId && ex < 0) { var qi = row.querySelector('input[data-k="qty"]'); if (qi) qi.focus(); } }
   if (T.bal[p.id] == null) refreshTxnBal();
 }
 async function txnCode(code){
@@ -1220,6 +1222,7 @@ async function submitTxn(){
   if (!T.lines.length) return toast('ยังไม่มีรายการสินค้า', 'bad');
   for (var i = 0; i < T.lines.length; i++) {
     var n = Number(T.lines[i].qty);
+    if (T.lines[i].qty === '' || T.lines[i].qty == null) { var e1 = $('t-row-' + i); if (e1) { var qi2 = e1.querySelector('input[data-k="qty"]'); if (qi2) qi2.focus(); } return toast('ยังไม่ได้กรอกจำนวน: ' + T.lines[i].sku + ' ' + T.lines[i].name, 'bad'); }
     if (!isFinite(n) || n === 0 || (T.type !== 'ADJUST' && n < 0)) return toast('จำนวนของ ' + T.lines[i].sku + ' ไม่ถูกต้อง', 'bad');
   }
   if (T.type === 'TRANSFER' && !T.to) return toast('เลือกสาขาปลายทาง', 'bad');
@@ -1385,7 +1388,7 @@ function renderCount(){
   html += C.rows.length ? C.rows.map(function(r, i){
     return '<tr id="c-row-' + i + '"><td class="sub">' + (i + 1) + '</td><td>' + pcell(r.img, esc(r.sku), esc(r.name)) + '</td>' +
       (C.hide ? '' : '<td class="num">' + qtyHtml(r.pid, C.bal[r.pid] || 0, r.base_unit_id) + '</td>') +
-      '<td>' + (PU[r.pid] || []).map(function(u){ var v = r.counts[u.unit_id]; return '<label class="uc"><input type="number" min="0" step="any" data-i="' + i + '" data-u="' + u.unit_id + '" value="' + (v == null ? '' : esc(v)) + '">' + esc(u.name) + '</label>'; }).join('') + '</td>' +
+      '<td>' + (PU[r.pid] || []).map(function(u){ var v = r.counts[u.unit_id]; return '<label class="uc"><input type="number" min="0" step="any" onfocus="this.select()" onclick="this.select()" data-i="' + i + '" data-u="' + u.unit_id + '" value="' + (v == null ? '' : esc(v)) + '">' + esc(u.name) + '</label>'; }).join('') + '</td>' +
       '<td class="num" id="c-tot-' + i + '"></td>' + (C.hide ? '' : '<td class="num" id="c-diff-' + i + '"></td>') +
       '<td><button class="x" onclick="C.rows.splice(' + i + ',1);saveCount();renderCount()">×</button></td></tr>';
   }).join('') : '<tr><td colspan="7" class="empty">เลือกหมวดหมู่แล้วกด "โหลดรายการสินค้า" เพื่อเตรียมรายการตามลำดับก่อนนับ<br>หรือสแกนสินค้าที่นับทีละรายการ</td></tr>';
@@ -1548,7 +1551,7 @@ function crTable(){
     CR.lines.map(function(l, i){
       if (CR.onlyDiff && Math.abs(l.cnt - l.sys) < 1e-9) return '';
       return '<tr><td>' + pcell(l.img, esc(l.name), esc(l.sku) + ' · ' + esc(uname(l.unit))) + '</td><td class="num">' + num(l.sys) + '</td>' +
-        '<td class="num">' + (edit ? '<input class="qty" type="number" min="0" step="any" data-i="' + i + '" value="' + l.cnt + '">' + (l.cnt !== l.orig ? '<div class="sub">เดิม ' + num(l.orig) + '</div>' : '') : num(l.cnt)) + '</td>' +
+        '<td class="num">' + (edit ? '<input class="qty" type="number" min="0" step="any" onfocus="this.select()" onclick="this.select()" data-i="' + i + '" value="' + l.cnt + '">' + (l.cnt !== l.orig ? '<div class="sub">เดิม ' + num(l.orig) + '</div>' : '') : num(l.cnt)) + '</td>' +
         '<td class="num" id="cr-d-' + i + '"></td><td class="num" id="cr-v-' + i + '"></td>' + (pend ? '<td class="num" id="cr-n-' + i + '"></td>' : '') + '</tr>';
     }).join('');
   CR.lines.forEach(function(_, i){ crRow(i); });
