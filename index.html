@@ -38,6 +38,12 @@ select:disabled{background:#f6f7f9;color:var(--ink)}
 .btn.ghost{background:transparent}
 .btn.sm{padding:4px 10px;font-size:13px}
 .btn:disabled{opacity:.45;cursor:default}
+.th{width:42px;height:42px;border-radius:7px;object-fit:cover;background:#eef0f3;flex:none;display:block}
+.th.sm{width:30px;height:30px;border-radius:5px}
+.th.ph{display:grid;place-items:center;color:#b0b6c0;font-size:11px}
+.pc{display:flex;gap:10px;align-items:center}
+.pimg{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:6px 0 4px}
+.pimg img,.pimg .ph{width:120px;height:120px;border-radius:10px;object-fit:cover;background:#eef0f3;border:1px solid var(--line)}
 .x{border:0;background:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0 6px}
 .x:hover{color:var(--bad)}
 label.f{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}
@@ -239,6 +245,7 @@ function errMsg(e){
   if (/foreign key/i.test(m)) return 'ลบไม่ได้ เพราะมีข้อมูลอื่นใช้งานอยู่';
   if (/row-level security|permission denied/i.test(m)) return 'ไม่มีสิทธิ์ทำรายการนี้';
   if (/Failed to fetch|NetworkError/i.test(m)) return 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบอินเทอร์เน็ต';
+  if (/Bucket not found|set_product_image|image_url/i.test(m)) return 'ยังไม่ได้เปิดใช้รูปสินค้า กรุณารันไฟล์ update_images.sql ใน Supabase ก่อน';
   if (/Invalid login credentials/i.test(m)) return 'อีเมลหรือรหัสผ่านไม่ถูกต้อง';
   if (/Email not confirmed/i.test(m)) return 'ยังไม่ได้ยืนยันอีเมล กรุณาตรวจสอบกล่องจดหมาย';
   return m;
@@ -358,7 +365,10 @@ function qtyHtml(pid, base, unitId, cls){
 }
 
 // ---------- ค้นหาสินค้า ----------
-var PCOLS = 'id,sku,name,base_unit_id,cost,category_id,active';
+var PCOLS = 'id,sku,name,base_unit_id,cost,category_id,active,image_url';
+var IMG_BUCKET = 'product-images';
+function thumb(url, cls){ return url ? '<img class="th ' + (cls || '') + '" src="' + esc(url) + '" loading="lazy" alt="" onerror="this.style.visibility=\'hidden\'">' : '<div class="th ph ' + (cls || '') + '" title="ไม่มีรูป"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg></div>'; }
+function pcell(url, main, sub){ return '<div class="pc">' + thumb(url) + '<div><b>' + main + '</b>' + (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div></div>'; }
 async function prodSearch(term){
   var t = cleanTerm(term);
   var qb = sb.from('products').select(PCOLS).eq('active', true).order('sku').limit(15);
@@ -384,7 +394,7 @@ function attachPicker(inputId, onPick){
       try {
         items = await prodSearch(v);
         if (inp.value.trim() !== v) return;
-        box.innerHTML = items.length ? items.map(function(p, i){ return '<div class="sug-i" data-i="' + i + '"><b>' + esc(p.sku) + '</b> &nbsp;' + esc(p.name) + '</div>'; }).join('') : '<div class="sug-e">ไม่พบสินค้า</div>';
+        box.innerHTML = items.length ? items.map(function(p, i){ return '<div class="sug-i pc" data-i="' + i + '">' + thumb(p.image_url, 'sm') + '<span><b>' + esc(p.sku) + '</b> &nbsp;' + esc(p.name) + '</span></div>'; }).join('') : '<div class="sug-e">ไม่พบสินค้า</div>';
         box.classList.remove('hidden');
       } catch(e){}
     }, 300);
@@ -583,11 +593,11 @@ async function loadStock(pg){
   SF.pg = pg;
   var r = await qc(stockQuery('*', {count:'exact'}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
   await loadUnits(r.data.map(function(x){ return x.product_id; }));
-  $h('s-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หมวด</th><th>สาขา</th><th class="num">คงเหลือ</th><th class="num">จุดสั่งซื้อ</th><th class="num">มูลค่า (ทุน)</th></tr>' +
+  $h('s-res').innerHTML = '<table><tr><th>สินค้า</th><th>หมวด</th><th>สาขา</th><th class="num">คงเหลือ</th><th class="num">จุดสั่งซื้อ</th><th class="num">มูลค่า (ทุน)</th></tr>' +
     (r.data.length ? r.data.map(function(x){
-      return '<tr class="click" onclick="stockCard(' + x.product_id + ',' + x.branch_id + ')"><td><b>' + esc(x.sku) + '</b></td><td>' + esc(x.name) + '</td><td>' + esc(x.category_name || '-') + '</td><td>' + esc(x.branch_name) +
+      return '<tr class="click" onclick="stockCard(' + x.product_id + ',' + x.branch_id + ')"><td>' + pcell(x.image_url, esc(x.name), esc(x.sku)) + '</td><td>' + esc(x.category_name || '-') + '</td><td>' + esc(x.branch_name) +
         '</td><td class="num">' + qtyHtml(x.product_id, x.qty, x.base_unit_id, x.is_low ? 'low' : '') + '</td><td class="num">' + (Number(x.min_qty) ? num(x.min_qty) : '-') + '</td><td class="num">' + money(x.stock_value) + '</td></tr>';
-    }).join('') : '<tr><td colspan="7" class="empty">ไม่พบข้อมูล</td></tr>') + '</table>' + pager(r.count, pg, 'loadStock');
+    }).join('') : '<tr><td colspan="6" class="empty">ไม่พบข้อมูล</td></tr>') + '</table>' + pager(r.count, pg, 'loadStock');
 }
 async function exportStock(){
   await busy(async function(){
@@ -605,7 +615,7 @@ async function stockCard(pid, branch){
     var bals = await q(sb.from('v_stock').select('branch_id,branch_name,qty,is_low').eq('product_id', pid).order('branch_id'));
     var mv = await q(sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,is_reversal,counted_base,stock_docs(id,doc_no,doc_type,ref_no)')
       .eq('product_id', pid).eq('branch_id', branch).order('id', {ascending:false}).limit(100));
-    openModal('<h2>' + esc(p.sku) + ' · ' + esc(p.name) + '</h2>' +
+    openModal('<h2>' + esc(p.sku) + ' · ' + esc(p.name) + '</h2>' + (p.image_url ? '<div class="pimg"><img src="' + esc(p.image_url) + '" alt=""></div>' : '') +
       '<dl class="dl"><dt>หมวดหมู่</dt><dd>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') + '</dd>' +
       '<dt>หน่วย</dt><dd>' + PU[pid].map(function(u){ return esc(u.name) + (u.factor !== 1 ? ' = ' + num(u.factor) + ' ' + esc(uname(p.base_unit_id)) : '') + (u.barcode ? ' <span class="sub">[' + esc(u.barcode) + ']</span>' : ''); }).join(', ') + '</dd>' +
       '<dt>ต้นทุน / ราคาขาย</dt><dd>' + money(p.cost) + ' / ' + money(p.price) + ' ต่อ' + esc(uname(p.base_unit_id)) + '</dd>' +
@@ -624,7 +634,7 @@ async function stockCard(pid, branch){
 // ============================================================
 PAGES.products = async function(){
   page('<div class="ph"><h1>รายการสินค้า</h1><div class="row">' +
-    (isMgr() ? '<button class="btn" onclick="downloadTemplate()">แม่แบบ Excel</button><label class="btn">นำเข้า Excel<input type="file" accept=".xlsx,.xls,.csv" class="hidden" onchange="importProducts(this.files[0]); this.value=\'\'"></label>' : '') +
+    (isMgr() ? '<label class="btn">อัปโหลดรูปหลายรูป<input type="file" accept="image/*" multiple class="hidden" onchange="bulkImages(this.files); this.value=\'\'"></label><button class="btn" onclick="downloadTemplate()">แม่แบบ Excel</button><label class="btn">นำเข้า Excel<input type="file" accept=".xlsx,.xls,.csv" class="hidden" onchange="importProducts(this.files[0]); this.value=\'\'"></label>' : '') +
     '<button class="btn" onclick="openBarcodeModal()">พิมพ์บาร์โค้ด</button><button class="btn" onclick="exportProducts()">ส่งออก Excel</button>' +
     (isMgr() ? '<button class="btn pri" onclick="editProduct(null)">+ เพิ่มสินค้า</button>' : '') + '</div></div>' +
     '<div class="card"><div class="row"><label class="f grow">ค้นหา <input id="p-t" placeholder="รหัส หรือ ชื่อสินค้า"></label>' +
@@ -647,13 +657,13 @@ function prodQuery(cols, opts){
 async function loadProducts(pg){
   var r = await qc(prodQuery('*', {count:'exact'}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
   await loadUnits(r.data.map(function(x){ return x.id; }));
-  $h('p-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หมวด</th><th>หน่วย</th><th class="num">ต้นทุน</th><th class="num">ราคาขาย</th><th class="num">จุดสั่งซื้อ</th><th></th></tr>' +
+  $h('p-res').innerHTML = '<table><tr><th>สินค้า</th><th>หมวด</th><th>หน่วย</th><th class="num">ต้นทุน</th><th class="num">ราคาขาย</th><th class="num">จุดสั่งซื้อ</th><th></th></tr>' +
     (r.data.length ? r.data.map(function(p){
       var units = (PU[p.id] || []).map(function(u){ return esc(u.name) + (u.factor !== 1 ? '=' + num(u.factor) : ''); }).join(', ');
-      return '<tr' + (isMgr() ? ' class="click" onclick="editProduct(' + p.id + ')"' : '') + '><td><b>' + esc(p.sku) + '</b></td><td>' + esc(p.name) + (p.active ? '' : ' <span class="b b-x">ปิดใช้งาน</span>') + '</td><td>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') +
+      return '<tr' + (isMgr() ? ' class="click" onclick="editProduct(' + p.id + ')"' : '') + '><td>' + pcell(p.image_url, esc(p.name) + (p.active ? '' : ' <span class="b b-x">ปิดใช้งาน</span>'), esc(p.sku)) + '</td><td>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') +
         '</td><td>' + units + '</td><td class="num">' + money(p.cost) + '</td><td class="num">' + money(p.price) + '</td><td class="num">' + (Number(p.min_qty) ? num(p.min_qty) : '-') + '</td>' +
         '<td><button class="btn sm" onclick="event.stopPropagation();stockCard(' + p.id + ',' + S.cur + ')">สต๊อก</button></td></tr>';
-    }).join('') : '<tr><td colspan="8" class="empty">ไม่พบสินค้า</td></tr>') + '</table>' + pager(r.count, pg, 'loadProducts');
+    }).join('') : '<tr><td colspan="7" class="empty">ไม่พบสินค้า</td></tr>') + '</table>' + pager(r.count, pg, 'loadProducts');
 }
 var PF = null;
 async function editProduct(id){
@@ -665,9 +675,11 @@ async function editProduct(id){
     PF = Object.assign({}, p, {units: PU[id].slice().reverse().map(function(u){ return {unit_id:u.unit_id, factor:u.factor, barcode:u.barcode || ''}; })});
   } else {
     var bu = S.units[0].id;
-    PF = {id:null, sku:'', name:'', category_id:null, base_unit_id:bu, cost:0, price:0, min_qty:0, note:'', active:true, units:[{unit_id:bu, factor:1, barcode:''}]};
+    PF = {id:null, sku:'', name:'', category_id:null, base_unit_id:bu, cost:0, price:0, min_qty:0, note:'', active:true, image_url:null, units:[{unit_id:bu, factor:1, barcode:''}]};
   }
   openModal('<h2>' + (id ? 'แก้ไขสินค้า' : 'เพิ่มสินค้า') + '</h2>' +
+    '<div class="pimg"><div id="pf-img">' + pfImgHtml() + '</div><div class="row"><label class="btn">' + (PF.image_url ? 'เปลี่ยนรูป' : 'เพิ่มรูป') + '<input type="file" accept="image/*" class="hidden" onchange="pfPickImage(this.files[0]); this.value=\'\'"></label>' +
+    '<button class="btn danger" id="pf-imgdel" onclick="pfRemoveImage()"' + (PF.image_url ? '' : ' style="display:none"') + '>ลบรูป</button></div></div>' +
     '<div class="row"><label class="f">รหัสสินค้า * <input id="pf-sku" value="' + esc(PF.sku) + '"></label><label class="f grow">ชื่อสินค้า * <input id="pf-name" value="' + esc(PF.name) + '"></label></div>' +
     '<div class="row" style="margin-top:10px"><label class="f">หมวดหมู่ <select id="pf-cat">' + catOptions(PF.category_id, '— ไม่ระบุ —') + '</select></label>' +
     '<label class="f">หน่วยฐาน (หน่วยเล็กสุด) <select id="pf-base" onchange="pfBase()">' + unitOptions(PF.base_unit_id) + '</select></label>' +
@@ -723,6 +735,8 @@ async function saveProduct(){
   if (!obj.sku || !obj.name) return toast('กรอกรหัสและชื่อสินค้า', 'bad');
   await busy(async function(){
     var id = await q(sb.rpc('save_product', {p: obj}));
+    if (PF.newImage) await uploadProductImage(id, PF.newImage, PF.image_url);
+    else if (PF.removeImage && PF.image_url) { await q(sb.rpc('set_product_image', {p_id:id, p_url:null})); removeStoredImage(PF.image_url); }
     delete PU[id]; closeModal(); toast('บันทึกสินค้าแล้ว');
     if ($('p-res')) loadProducts(0);
   });
@@ -740,6 +754,79 @@ async function exportProducts(){
     }), 'สินค้า', 'products_' + today() + '.xlsx');
   });
 }
+// ============================================================
+//  รูปสินค้า
+// ============================================================
+// ย่อรูปก่อนอัปโหลด (ด้านยาวสุด 600px, JPEG) ประหยัดพื้นที่และโหลดเร็ว
+function resizeImage(file, max){
+  return new Promise(function(resolve, reject){
+    var url = URL.createObjectURL(file), img = new Image();
+    img.onload = function(){
+      var k = Math.min(1, max / Math.max(img.width, img.height)), c = document.createElement('canvas');
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      var ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      c.toBlob(function(b){ b ? resolve(b) : reject(new Error('แปลงรูปไม่สำเร็จ')); }, 'image/jpeg', 0.85);
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('เปิดไฟล์รูปไม่ได้: ' + file.name)); };
+    img.src = url;
+  });
+}
+function storedPath(url){ var m = String(url || '').match(/\/object\/public\/product-images\/(.+)$/); return m ? decodeURIComponent(m[1]) : null; }
+function removeStoredImage(url){ var path = storedPath(url); if (path) sb.storage.from(IMG_BUCKET).remove([path]).catch(function(){}); }
+async function uploadProductImage(pid, file, oldUrl){
+  var blob = await resizeImage(file, 600), path = 'p' + pid + '-' + Date.now() + '.jpg';
+  var up = await sb.storage.from(IMG_BUCKET).upload(path, blob, {contentType:'image/jpeg', cacheControl:'31536000', upsert:false});
+  if (up.error) throw up.error;
+  var url = sb.storage.from(IMG_BUCKET).getPublicUrl(path).data.publicUrl;
+  await q(sb.rpc('set_product_image', {p_id:pid, p_url:url}));
+  if (oldUrl) removeStoredImage(oldUrl);
+  return url;
+}
+function pfImgHtml(){
+  var src = PF.previewUrl || (PF.removeImage ? null : PF.image_url);
+  return src ? '<img src="' + esc(src) + '" alt="">' : '<div class="ph" style="display:grid;place-items:center;color:#b0b6c0">ไม่มีรูป</div>';
+}
+function pfPickImage(file){
+  if (!file) return;
+  if (!/^image\//.test(file.type)) return toast('กรุณาเลือกไฟล์รูปภาพ', 'bad');
+  if (PF.previewUrl) URL.revokeObjectURL(PF.previewUrl);
+  PF.newImage = file; PF.removeImage = false; PF.previewUrl = URL.createObjectURL(file);
+  $('pf-img').innerHTML = pfImgHtml(); $('pf-imgdel').style.display = '';
+}
+function pfRemoveImage(){
+  if (PF.previewUrl) URL.revokeObjectURL(PF.previewUrl);
+  PF.newImage = null; PF.previewUrl = null; PF.removeImage = true;
+  $('pf-img').innerHTML = pfImgHtml(); $('pf-imgdel').style.display = 'none';
+}
+// อัปโหลดรูปหลายรูปพร้อมกัน: ตั้งชื่อไฟล์ตามรหัสสินค้า เช่น LC001.jpg
+async function bulkImages(files){
+  files = Array.prototype.slice.call(files || []).filter(function(f){ return /^image\//.test(f.type); });
+  if (!files.length) return;
+  await busy(async function(){
+    var prods = await fetchAll(function(){ return sb.from('products').select('id,sku,image_url').order('id'); });
+    var bySku = {}; prods.forEach(function(p){ bySku[p.sku.toUpperCase()] = p; });
+    var matched = [], unmatched = [];
+    files.forEach(function(f){ var key = f.name.replace(/\.[^.]+$/, '').trim().toUpperCase(); (bySku[key] ? matched : unmatched).push({f:f, p:bySku[key]}); });
+    if (!matched.length) throw new Error('ไม่พบไฟล์ที่ชื่อตรงกับรหัสสินค้า (ตั้งชื่อไฟล์เป็นรหัส เช่น LC001.jpg)');
+    var replace = matched.filter(function(x){ return x.p.image_url; }).length;
+    if (!confirm('อัปโหลดรูป ' + matched.length + ' รูป' + (replace ? ' (แทนรูปเดิม ' + replace + ' รายการ)' : '') + (unmatched.length ? '\nไม่ตรงกับรหัสสินค้า ' + unmatched.length + ' ไฟล์ จะถูกข้าม' : '') + '\nดำเนินการต่อ?')) return;
+    var ok = 0, errs = [];
+    for (var i = 0; i < matched.length; i++) {
+      $('loading').textContent = 'กำลังอัปโหลดรูป ' + (i + 1) + ' / ' + matched.length;
+      try { await uploadProductImage(matched[i].p.id, matched[i].f, matched[i].p.image_url); ok++; }
+      catch(e){ errs.push(matched[i].f.name + ': ' + errMsg(e)); if (/update_images\.sql/.test(errMsg(e))) break; }
+    }
+    $('loading').textContent = 'กำลังทำงาน...';
+    openModal('<h2>ผลการอัปโหลดรูป</h2><p>สำเร็จ ' + ok + ' รูป' + (errs.length ? ', ไม่สำเร็จ ' + errs.length + ' รูป' : '') + (unmatched.length ? ', ข้าม ' + unmatched.length + ' ไฟล์ (ชื่อไม่ตรงรหัส)' : '') + '</p>' +
+      (errs.length || unmatched.length ? '<div class="tbl-wrap"><table>' + errs.map(function(e){ return '<tr><td class="low">' + esc(e) + '</td></tr>'; }).join('') +
+        unmatched.map(function(x){ return '<tr><td class="sub">ข้าม: ' + esc(x.f.name) + '</td></tr>'; }).join('') + '</table></div>' : '') +
+      '<div class="row end"><button class="btn pri" onclick="closeModal()">ตกลง</button></div>');
+    if ($('p-res')) loadProducts(0);
+  });
+  $('loading').textContent = 'กำลังทำงาน...';
+}
+
 // ============================================================
 //  พิมพ์บาร์โค้ด (สติกเกอร์ติดชั้นวาง / แผ่นรวมสำหรับสแกน)
 // ============================================================
@@ -952,7 +1039,7 @@ function renderTxnLines(){
   var cost = T.type === 'IN';
   var html = '<tr><th>#</th><th>สินค้า</th><th>หน่วย</th><th class="num">จำนวน</th>' + (cost ? '<th class="num">ทุน/หน่วยที่เลือก</th>' : '') + '<th class="num">คงเหลือในสาขา</th><th></th></tr>';
   html += T.lines.length ? T.lines.map(function(l, i){
-    return '<tr id="t-row-' + i + '"><td>' + (i + 1) + '</td><td><b>' + esc(l.sku) + '</b><div class="sub">' + esc(l.name) + '</div></td>' +
+    return '<tr id="t-row-' + i + '"><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.sku), esc(l.name)) + '</td>' +
       '<td><select data-i="' + i + '" data-k="unit_id">' + (PU[l.pid] || []).map(function(u){ return '<option value="' + u.unit_id + '"' + (u.unit_id == l.unit_id ? ' selected' : '') + '>' + esc(u.name) + (u.factor !== 1 ? ' (' + num(u.factor) + ')' : '') + '</option>'; }).join('') + '</select></td>' +
       '<td class="num"><input class="qty" type="number" step="any" data-i="' + i + '" data-k="qty" value="' + esc(l.qty) + '"></td>' +
       (cost ? '<td class="num"><input class="qty" type="number" step="any" data-i="' + i + '" data-k="cost" value="' + esc(l.cost == null ? '' : l.cost) + '" placeholder="-"></td>' : '') +
@@ -992,7 +1079,7 @@ async function addTxnLine(p, unitId){
   var uid = unitId || p.base_unit_id;
   var ex = T.lines.findIndex(function(l){ return l.pid === p.id && l.unit_id == uid; });
   if (ex >= 0) T.lines[ex].qty = Number(T.lines[ex].qty || 0) + 1;
-  else T.lines.push({pid:p.id, sku:p.sku, name:p.name, base_unit_id:p.base_unit_id, unit_id:uid, qty:1,
+  else T.lines.push({pid:p.id, sku:p.sku, name:p.name, img:p.image_url || null, base_unit_id:p.base_unit_id, unit_id:uid, qty:1,
     unitCost:Number(p.cost) || null, cost:T.type === 'IN' && Number(p.cost) ? +(Number(p.cost) * factorOf(p.id, uid)).toFixed(2) : ''});
   beep(true); saveTxn(); renderTxnLines();
   var row = $('t-row-' + (ex >= 0 ? ex : T.lines.length - 1)); if (row) row.classList.add('flash');
@@ -1158,7 +1245,7 @@ function touched(r){ return Object.keys(r.counts).some(function(k){ return r.cou
 function renderCount(){
   var html = '<tr><th>สินค้า</th>' + (C.hide ? '' : '<th class="num">ยอดในระบบ</th>') + '<th>จำนวนที่นับได้</th><th class="num">รวม (หน่วยฐาน)</th>' + (C.hide ? '' : '<th class="num">ผลต่าง</th>') + '<th></th></tr>';
   html += C.rows.length ? C.rows.map(function(r, i){
-    return '<tr id="c-row-' + i + '"><td><b>' + esc(r.sku) + '</b><div class="sub">' + esc(r.name) + '</div></td>' +
+    return '<tr id="c-row-' + i + '"><td>' + pcell(r.img, esc(r.sku), esc(r.name)) + '</td>' +
       (C.hide ? '' : '<td class="num">' + qtyHtml(r.pid, C.bal[r.pid] || 0, r.base_unit_id) + '</td>') +
       '<td>' + (PU[r.pid] || []).map(function(u){ var v = r.counts[u.unit_id]; return '<label class="uc"><input type="number" min="0" step="any" data-i="' + i + '" data-u="' + u.unit_id + '" value="' + (v == null ? '' : esc(v)) + '">' + esc(u.name) + '</label>'; }).join('') + '</td>' +
       '<td class="num" id="c-tot-' + i + '"></td>' + (C.hide ? '' : '<td class="num" id="c-diff-' + i + '"></td>') +
@@ -1177,7 +1264,7 @@ async function addCountRow(p, unitId){
   await loadUnits([p.id]);
   var i = C.rows.findIndex(function(r){ return r.pid === p.id; });
   if (i < 0) {
-    C.rows.unshift({pid:p.id, sku:p.sku, name:p.name, base_unit_id:p.base_unit_id, counts:{}}); i = 0;
+    C.rows.unshift({pid:p.id, sku:p.sku, name:p.name, img:p.image_url || null, base_unit_id:p.base_unit_id, counts:{}}); i = 0;
     var b = await q(sb.from('stock_balances').select('qty').eq('branch_id', C.branch).eq('product_id', p.id).maybeSingle());
     C.bal[p.id] = b ? Number(b.qty) : 0;
   } else if (i > 0) { C.rows.unshift(C.rows.splice(i, 1)[0]); i = 0; }
@@ -1196,7 +1283,7 @@ async function countLoadCat(){
     if (!list.length) return toast('ไม่พบสินค้าในหมวดนี้', 'bad');
     if (list.length > 1500 && !confirm('มีสินค้า ' + list.length + ' รายการ อาจทำให้หน้าเว็บช้า แนะนำให้นับทีละหมวด ต้องการโหลดทั้งหมดหรือไม่?')) return;
     var have = {}; C.rows.forEach(function(r){ have[r.pid] = 1; });
-    list.forEach(function(p){ if (!have[p.id]) C.rows.push({pid:p.id, sku:p.sku, name:p.name, base_unit_id:p.base_unit_id, counts:{}}); });
+    list.forEach(function(p){ if (!have[p.id]) C.rows.push({pid:p.id, sku:p.sku, name:p.name, img:p.image_url || null, base_unit_id:p.base_unit_id, counts:{}}); });
     await loadUnits(list.map(function(p){ return p.id; }));
     saveCount(); await countBal();
   });
