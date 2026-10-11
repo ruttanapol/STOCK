@@ -497,7 +497,7 @@ async function afterLogin(){
     try { me.extra = (await q(sb.from('profile_branches').select('branch_id').eq('profile_id', me.id))).map(function(r){ return r.branch_id; }); } catch(e){ me.extra = []; }
     S.cur = (saved && myBranches().some(function(b){ return b.id === saved; })) ? saved : (me.branch_id || (myBranches()[0] || {}).id);
     buildNav(); show('s-app');
-    go(location.hash.slice(1) || 'dash');
+    go(location.hash.slice(1) || homePage());
   } catch(e){ toast(errMsg(e), 'bad'); show('s-login'); }
 }
 async function loadMaster(){
@@ -518,15 +518,26 @@ var NAV = [
   ['dash','แดชบอร์ด'], ['stock','สินค้าคงเหลือ'], ['txn','ทำรายการ'], ['docs','ประวัติเอกสาร'],
   ['products','รายการสินค้า'], ['count','ตรวจนับสต๊อก'], ['report','รายงาน'], ['settings','ตั้งค่า', 'mgr']
 ];
+// พนักงานเห็นแค่ "สินค้าคงเหลือ" (สาขาตัวเอง), "จ่ายออก" และ "ตรวจนับสต๊อก"
+var STAFF_PAGES = ['stock', 'txn', 'count'];
+function canPage(p){
+  if (!PAGES[p]) return false;
+  if (me && me.role === 'staff') return STAFF_PAGES.indexOf(p) >= 0;
+  var n = NAV.find(function(x){ return x[0] === p; });
+  return !(n && n[2] && !isMgr());
+}
+function homePage(){ return me && me.role === 'staff' ? 'txn' : 'dash'; }
 function buildNav(){
-  $('nav').innerHTML = NAV.filter(function(n){ return !n[2] || isMgr(); }).map(function(n){ return '<a data-p="' + n[0] + '" onclick="go(\'' + n[0] + '\')">' + n[1] + '</a>'; }).join('');
+  $('nav').innerHTML = NAV.filter(function(n){ return canPage(n[0]); }).map(function(n){
+    var label = (me.role === 'staff' && n[0] === 'txn') ? 'จ่ายออก' : n[1];
+    return '<a data-p="' + n[0] + '" onclick="go(\'' + n[0] + '\')">' + label + '</a>'; }).join('');
   $('me-box').innerHTML = '<b>' + esc(me.full_name || me.email) + '</b>' + ROLE[me.role] + (isAdmin() ? ' · ทุกสาขา' : ' · ' + esc(myBranches().map(function(b){ return b.name; }).join(', '))) +
     '<br><button class="btn sm" onclick="logout()">ออกจากระบบ</button>';
 }
 function toggleSide(open){ $('side').classList.toggle('open', open); $('side-dim').classList.toggle('on', open); }
 function page(html){ $('page').innerHTML = html; }
 async function go(p){
-  if (!PAGES[p] || (NAV.find(function(n){ return n[0] === p && n[2]; }) && !isMgr())) p = 'dash';
+  if (!canPage(p)) p = homePage();
   if (location.hash.slice(1) !== p) history.replaceState(null, '', '#' + p);
   document.querySelectorAll('#nav a').forEach(function(a){ a.classList.toggle('on', a.dataset.p === p); });
   toggleSide(false); closeModal(); curPage = p;
@@ -1116,12 +1127,12 @@ PAGES.txn = async function(){
   if (!T) T = Object.assign({type:'IN', branch:null, to:null, ref:'', note:'', lines:[]}, ls.get('txn_draft', {}));
   T.date = T.date || today(); T.bal = {};
   if (!myBranches().some(function(b){ return b.id === T.branch; })) T.branch = S.cur;
-  if (T.type === 'ADJUST' && !isMgr()) T.type = 'IN';
+  if (!isMgr()) T.type = 'OUT';   // พนักงานบันทึกได้เฉพาะจ่ายออก
   await loadUnits(T.lines.map(function(l){ return l.pid; }));
   if (curPage !== 'txn') return;
   renderTxn();
 };
-function setTxnType(t){ readTxnHead(); T.type = t; saveTxn(); renderTxn(); }
+function setTxnType(t){ if (!isMgr()) t = 'OUT'; readTxnHead(); T.type = t; saveTxn(); renderTxn(); }
 function readTxnHead(){
   if (!$('t-br')) return;
   T.branch = selNum('t-br'); T.to = $('t-to') ? selNum('t-to') : T.to;
@@ -1132,9 +1143,9 @@ function toOptions(){
     .map(function(b){ return '<option value="' + b.id + '"' + (b.id === T.to ? ' selected' : '') + '>' + esc(b.name) + '</option>'; }).join('');
 }
 function renderTxn(){
-  var types = [['IN','รับเข้า'],['OUT','จ่ายออก'],['TRANSFER','โอนย้ายสาขา']].concat(isMgr() ? [['ADJUST','ปรับยอด']] : []);
-  page('<div class="ph"><h1>ทำรายการสต๊อก</h1></div>' +
-    '<div class="seg">' + types.map(function(t){ return '<button class="' + (T.type === t[0] ? 'on' : '') + '" onclick="setTxnType(\'' + t[0] + '\')">' + t[1] + '</button>'; }).join('') + '</div>' +
+  var types = isMgr() ? [['IN','รับเข้า'],['OUT','จ่ายออก'],['TRANSFER','โอนย้ายสาขา'],['ADJUST','ปรับยอด']] : [['OUT','จ่ายออก']];
+  page('<div class="ph"><h1>' + (isMgr() ? 'ทำรายการสต๊อก' : 'จ่ายออกสินค้า') + '</h1></div>' +
+    (types.length < 2 ? '<div>' : '<div class="seg">') + (types.length < 2 ? '' : types.map(function(t){ return '<button class="' + (T.type === t[0] ? 'on' : '') + '" onclick="setTxnType(\'' + t[0] + '\')">' + t[1] + '</button>'; }).join('')) + '</div>' +
     '<div class="card"><div class="row">' +
     '<label class="f">' + (T.type === 'TRANSFER' ? 'จากสาขา' : 'สาขา') + ' ' + branchSel('t-br', {value:T.branch}) + '</label>' +
     (T.type === 'TRANSFER' ? '<label class="f">ไปสาขา <select id="t-to">' + toOptions() + '</select></label>' : '') +
