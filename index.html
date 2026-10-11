@@ -329,11 +329,12 @@ function isAdmin(){ return me && me.role === 'admin'; }
 function isMgr(){ return me && (me.role === 'admin' || me.role === 'manager'); }
 function bname(id){ return S.branchMap[id] ? S.branchMap[id].name : '-'; }
 function uname(id){ return S.unitMap[id] ? S.unitMap[id].name : '?'; }
-function myBranches(){ return isAdmin() ? S.branches.filter(function(b){ return b.active; }) : S.branches.filter(function(b){ return b.id === me.branch_id; }); }
+function myBranches(){ return S.branches.filter(function(b){ return b.active && (isAdmin() || b.id === me.branch_id || (me.extra || []).indexOf(b.id) >= 0); }); }
+function multiBranch(){ return myBranches().length > 1; }
 function branchSel(id, o){
   o = o || {};
   var list = myBranches(), v = o.value !== undefined ? o.value : S.cur;
-  var all = o.all && isAdmin();
+  var all = o.all && multiBranch();
   var html = (all ? '<option value=""' + (v == null || v === '' ? ' selected' : '') + '>ทุกสาขา</option>' : '') +
     list.map(function(b){ return '<option value="' + b.id + '"' + (b.id == v ? ' selected' : '') + '>' + esc(b.name) + '</option>'; }).join('');
   return '<select id="' + id + '" data-br="1"' + (list.length <= 1 && !all ? ' disabled' : '') + '>' + html + '</select>';
@@ -492,7 +493,8 @@ async function afterLogin(){
     me = prof;
     await loadMaster();
     var saved = ls.get('cur_branch', null);
-    S.cur = isAdmin() ? ((saved && S.branchMap[saved]) ? saved : (me.branch_id || (myBranches()[0] || {}).id)) : me.branch_id;
+    try { me.extra = (await q(sb.from('profile_branches').select('branch_id').eq('profile_id', me.id))).map(function(r){ return r.branch_id; }); } catch(e){ me.extra = []; }
+    S.cur = (saved && myBranches().some(function(b){ return b.id === saved; })) ? saved : (me.branch_id || (myBranches()[0] || {}).id);
     buildNav(); show('s-app');
     go(location.hash.slice(1) || 'dash');
   } catch(e){ toast(errMsg(e), 'bad'); show('s-login'); }
@@ -517,7 +519,7 @@ var NAV = [
 ];
 function buildNav(){
   $('nav').innerHTML = NAV.filter(function(n){ return !n[2] || isMgr(); }).map(function(n){ return '<a data-p="' + n[0] + '" onclick="go(\'' + n[0] + '\')">' + n[1] + '</a>'; }).join('');
-  $('me-box').innerHTML = '<b>' + esc(me.full_name || me.email) + '</b>' + ROLE[me.role] + (me.branch_id ? ' · ' + esc(bname(me.branch_id)) : ' · ทุกสาขา') +
+  $('me-box').innerHTML = '<b>' + esc(me.full_name || me.email) + '</b>' + ROLE[me.role] + (isAdmin() ? ' · ทุกสาขา' : ' · ' + esc(myBranches().map(function(b){ return b.name; }).join(', '))) +
     '<br><button class="btn sm" onclick="logout()">ออกจากระบบ</button>';
 }
 function toggleSide(open){ $('side').classList.toggle('open', open); $('side-dim').classList.toggle('on', open); }
@@ -1335,7 +1337,6 @@ function setCountTab(t){ C.tab = t; PAGES.count(); }
 async function countPendingN(){
   try {
     var qb = sb.from('count_sessions').select('id', {count:'exact', head:true}).eq('status', 'pending');
-    if (!isAdmin()) qb = qb.eq('branch_id', me.branch_id);
     var r = await qb; C.pendingN = r.count || 0;
   } catch(e){ C.pendingN = 0; }
 }
@@ -1461,7 +1462,7 @@ async function submitCount(){
 async function renderSessions(){
   var pend = C.tab === 'pending';
   page('<div class="ph"><h1>ตรวจนับสต๊อก</h1></div>' + countTabs() +
-    '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('cs-br', {all:true, value: isAdmin() ? '' : C.branch}) + '</label>' +
+    '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('cs-br', {all:true, value: multiBranch() ? '' : C.branch}) + '</label>' +
     (pend ? '' : '<label class="f">สถานะ <select id="cs-st"><option value="">ทั้งหมด</option><option value="approved">อนุมัติแล้ว</option><option value="rejected">ไม่อนุมัติ</option></select></label>') +
     '</div></div><div class="card"><div class="tbl-wrap" id="cs-res"></div></div>');
   $('cs-br').onchange = loadSessions; if ($('cs-st')) $('cs-st').onchange = loadSessions;
@@ -1604,7 +1605,7 @@ PAGES.report = async function(){
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('r-br', {all:true}) + '</label>' +
     '<label class="f">ตั้งแต่ <input type="date" id="r-from" value="' + monthStart() + '"></label><label class="f">ถึง <input type="date" id="r-to" value="' + today() + '"></label>' +
     '<button class="btn pri" onclick="runReport()">แสดงรายงาน</button><button class="btn" onclick="exportReport()">ส่งออก Excel</button><button class="btn" onclick="exportMoves(\'r\')">ส่งออกรายการเคลื่อนไหว</button></div>' +
-    '<p class="sub">ยอดยกมา + รับเข้า − จ่ายออก = คงเหลือ (หน่วยฐาน) · รวมการโอน ปรับยอด ตรวจนับ และรายการยกเลิก' + (isAdmin() ? ' · "ทุกสาขา" ไม่นับรวมการโอนระหว่างสาขาเป็นเข้า/ออก' : '') + '</p></div>' +
+    '<p class="sub">ยอดยกมา + รับเข้า − จ่ายออก = คงเหลือ (หน่วยฐาน) · รวมการโอน ปรับยอด ตรวจนับ และรายการยกเลิก' + (multiBranch() ? ' · "ทุกสาขา" = รวมทุกสาขาที่มีสิทธิ์ และไม่นับการโอนระหว่างสาขาในกลุ่มเป็นเข้า/ออก' : '') + '</p></div>' +
     '<div class="card"><div class="tbl-wrap" id="r-res"></div></div>');
   await runReport();
 };
@@ -1614,7 +1615,9 @@ async function runReport(){
   await busy(async function(){
     RPT = await fetchAll(function(){ return sb.rpc('stock_report', {p_branch:b, p_from:from, p_to:to}); });
     if (!b) { // ทุกสาขา: ตัดการโอนระหว่างสาขาออกจากเข้า/ออก
-      var tr = await fetchAll(function(){ return sb.from('stock_moves').select('product_id,qty_base,stock_docs!inner(doc_type)').eq('stock_docs.doc_type', 'TRANSFER').gte('move_date', from).lte('move_date', to); });
+      var mine = myBranches().map(function(b){ return b.id; });
+      var tr = (await fetchAll(function(){ return sb.from('stock_moves').select('product_id,qty_base,stock_docs!inner(doc_type,branch_id,to_branch_id)').eq('stock_docs.doc_type', 'TRANSFER').gte('move_date', from).lte('move_date', to); }))
+        .filter(function(m){ return mine.indexOf(m.stock_docs.branch_id) >= 0 && mine.indexOf(m.stock_docs.to_branch_id) >= 0; });
       var adj = {}; tr.forEach(function(m){ var a = adj[m.product_id] || (adj[m.product_id] = {i:0, o:0}); if (m.qty_base > 0) a.i += Number(m.qty_base); else a.o -= Number(m.qty_base); });
       RPT.forEach(function(r){ var a = adj[r.product_id]; if (a) { r.qty_in = Number(r.qty_in) - a.i; r.qty_out = Number(r.qty_out) - a.o; } });
     }
@@ -1672,17 +1675,40 @@ PAGES.settings = async function(){
   page(html);
   if (isAdmin()) await loadUsers();
 };
+var EXTRA = {};   // profile_id -> [branch_id]
 async function loadUsers(){
   var users = await q(sb.from('profiles').select('*').order('created_at'));
+  EXTRA = {}; var extraOk = true;
+  try { (await q(sb.from('profile_branches').select('profile_id,branch_id'))).forEach(function(r){ (EXTRA[r.profile_id] = EXTRA[r.profile_id] || []).push(r.branch_id); }); }
+  catch(e){ extraOk = false; }
   var bo = function(v){ return '<option value="">— ทุกสาขา (เฉพาะผู้ดูแล) —</option>' + S.branches.map(function(b){ return '<option value="' + b.id + '"' + (b.id === v ? ' selected' : '') + '>' + esc(b.name) + '</option>'; }).join(''); };
-  $h('u-res').innerHTML = '<table><tr><th>ผู้ใช้</th><th>บทบาท</th><th>สาขา</th><th>อนุมัติ</th><th></th></tr>' + users.map(function(u){
+  $h('u-res').innerHTML = '<table><tr><th>ผู้ใช้</th><th>บทบาท</th><th>สาขาหลัก</th><th>สาขาเพิ่มเติม</th><th>อนุมัติ</th><th></th></tr>' + users.map(function(u){
+    var ex = (EXTRA[u.id] || []).map(function(id){ return esc(bname(id)); }).join(', ');
     var self = u.id === me.id;
     return '<tr><td><b>' + esc(u.full_name || '-') + '</b><div class="sub">' + esc(u.email) + '</div></td>' +
       '<td><select id="ur-' + u.id + '"' + (self ? ' disabled' : '') + '>' + Object.keys(ROLE).map(function(k){ return '<option value="' + k + '"' + (u.role === k ? ' selected' : '') + '>' + ROLE[k] + '</option>'; }).join('') + '</select></td>' +
       '<td><select id="ub-' + u.id + '">' + bo(u.branch_id) + '</select></td>' +
+      '<td>' + (u.role === 'admin' ? '<span class="sub">ทุกสาขาอยู่แล้ว</span>' : !extraOk ? '<span class="sub">รัน update_multi_branch.sql ก่อน</span>' :
+        '<span class="sub">' + (ex || '-') + '</span> <button class="btn sm" onclick="editExtra(\'' + u.id + '\')">เลือกสาขา</button>') + '</td>' +
       '<td><input type="checkbox" id="ua-' + u.id + '"' + (u.active ? ' checked' : '') + (self ? ' disabled' : '') + '>' + (u.active ? '' : ' <span class="b b-ADJUST">รออนุมัติ</span>') + '</td>' +
       '<td><button class="btn sm" onclick="saveUser(\'' + u.id + '\')">บันทึก</button></td></tr>';
   }).join('') + '</table>';
+}
+function editExtra(id){
+  var main = $('ub-' + id).value ? Number($('ub-' + id).value) : null, cur = EXTRA[id] || [];
+  openModal('<h2>สาขาเพิ่มเติม</h2><p class="sub" style="margin-top:-6px">ผู้ใช้จะเห็นและทำรายการในสาขาที่เลือกได้ตามบทบาทของตัวเอง เหมือนสาขาหลัก</p><div style="display:grid;gap:8px;margin:12px 0">' +
+    S.branches.filter(function(b){ return b.active; }).map(function(b){
+      var isMain = b.id === main;
+      return '<label class="chk"><input type="checkbox" class="xb" value="' + b.id + '"' + (isMain || cur.indexOf(b.id) >= 0 ? ' checked' : '') + (isMain ? ' disabled' : '') + '> ' + esc(b.name) + (isMain ? ' <span class="sub">(สาขาหลัก)</span>' : '') + '</label>';
+    }).join('') + '</div><div class="row end"><button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn pri" onclick="saveExtra(\'' + id + '\',' + (main || 'null') + ')">บันทึก</button></div>');
+}
+async function saveExtra(id, main){
+  var ids = Array.prototype.map.call(document.querySelectorAll('.xb:checked'), function(c){ return Number(c.value); }).filter(function(b){ return b !== main; });
+  await busy(async function(){
+    await q(sb.from('profile_branches').delete().eq('profile_id', id));
+    if (ids.length) await q(sb.from('profile_branches').insert(ids.map(function(b){ return {profile_id:id, branch_id:b}; })));
+    closeModal(); toast('บันทึกสาขาเพิ่มเติมแล้ว (ผู้ใช้ต้องรีเฟรชหน้าเว็บ)'); await loadUsers();
+  });
 }
 async function saveUser(id){
   var role = $('ur-' + id).value, br = $('ub-' + id).value ? Number($('ub-' + id).value) : null, act = $('ua-' + id).checked;
