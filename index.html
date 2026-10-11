@@ -194,8 +194,8 @@ td input.qty{width:100px;text-align:right}
 // ============================================================
 //  ตั้งค่า: ใส่ค่าของโปรเจค Supabase ที่นี่ (หรือกรอกผ่านหน้าจอครั้งแรก)
 // ============================================================
-var SUPABASE_URL = 'https://qmkosjhjkhlurwmxngnp.supabase.co';
-var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFta29zamhqa2hsdXJ3bXhuZ25wIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE2ODI2NzYsImV4cCI6MjEwNzI1ODY3Nn0.J3dSK2bFl9i5si1BJGIEz6mvkMyJVqYKYq55DJ7fNWU';
+var SUPABASE_URL = '';
+var SUPABASE_KEY = '';
 
 var PAGE_SIZE = 50;
 var TYPE = {IN:'รับเข้า', OUT:'จ่ายออก', TRANSFER:'โอนย้าย', ADJUST:'ปรับยอด', COUNT:'ตรวจนับ'};
@@ -204,9 +204,12 @@ var sb = null, me = null;
 var S = {branches:[], units:[], cats:[], unitMap:{}, branchMap:{}, catMap:{}, cur:null};
 var PU = {};        // หน่วยของสินค้า: product_id -> [{unit_id,factor,barcode,name}] (เรียงจากใหญ่ไปเล็ก)
 var PAGES = {};
+var curPage = null;   // หน้าที่เปิดอยู่ (กันหน้าเก่าที่โหลดช้ามาวาดทับหน้าใหม่)
 
 // ---------- ตัวช่วยทั่วไป ----------
 function $(id){ return document.getElementById(id); }
+// ใช้กับส่วนที่โหลดข้อมูลแบบรอผล: ถ้าผู้ใช้เปลี่ยนหน้าไปก่อนโหลดเสร็จ จะไม่เกิด error
+function $h(id){ return document.getElementById(id) || {}; }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 function num(n, d){ return Number(n || 0).toLocaleString('th-TH', {maximumFractionDigits: d == null ? 3 : d}); }
 function money(n){ return Number(n || 0).toLocaleString('th-TH', {minimumFractionDigits:2, maximumFractionDigits:2}); }
@@ -409,10 +412,18 @@ function attachPicker(inputId, onPick){
 // ============================================================
 //  เริ่มต้น / เข้าสู่ระบบ
 // ============================================================
+// ตัด path ส่วนเกินออก เช่น .../rest/v1/ หรือลิงก์หน้า dashboard ให้เหลือ https://xxxx.supabase.co
+function normUrl(u){
+  u = String(u || '').trim();
+  var m = u.match(/supabase\.com\/dashboard\/project\/([a-z0-9]+)/i);
+  if (m) return 'https://' + m[1] + '.supabase.co';
+  m = u.match(/^(https?:\/\/[^\/?#\s]+)/i);
+  return m ? m[1] : u;
+}
 function show(id){ ['s-setup','s-login','s-pending','s-app'].forEach(function(s){ $(s).classList.toggle('hidden', s !== id); }); }
 async function init(){
   var cfg = ls.get('stock_cfg', null) || {};
-  var url = SUPABASE_URL || cfg.url, key = SUPABASE_KEY || cfg.key;
+  var url = normUrl(SUPABASE_URL || cfg.url), key = String(SUPABASE_KEY || cfg.key || '').trim();
   if (!url || !key) return show('s-setup');
   if (!window.supabase) { show('s-login'); return toast('โหลดไลบรารี Supabase ไม่สำเร็จ', 'bad'); }
   sb = supabase.createClient(url, key);
@@ -420,7 +431,7 @@ async function init(){
   if (r.data && r.data.session) await afterLogin(); else show('s-login');
 }
 function saveCfg(){
-  var url = $('cfg-url').value.trim().replace(/\/+$/, ''), key = $('cfg-key').value.trim();
+  var url = normUrl($('cfg-url').value), key = $('cfg-key').value.trim();
   if (!/^https:\/\//.test(url) || !key) return toast('กรอก URL และ key ให้ครบ', 'bad');
   ls.set('stock_cfg', {url: url, key: key}); location.reload();
 }
@@ -491,7 +502,7 @@ async function go(p){
   if (!PAGES[p] || (NAV.find(function(n){ return n[0] === p && n[2]; }) && !isMgr())) p = 'dash';
   if (location.hash.slice(1) !== p) history.replaceState(null, '', '#' + p);
   document.querySelectorAll('#nav a').forEach(function(a){ a.classList.toggle('on', a.dataset.p === p); });
-  toggleSide(false); closeModal();
+  toggleSide(false); closeModal(); curPage = p;
   try { await PAGES[p](); } catch(e){ console.error(e); toast(errMsg(e), 'bad'); }
 }
 function pager(total, pg, fn){
@@ -519,7 +530,7 @@ async function loadDash(){
   var dq = sb.from('stock_docs').select('id', {count:'exact', head:true}).eq('doc_date', today());
   if (b) dq = dq.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
   var dc = await dq;
-  $('d-stats').innerHTML =
+  $h('d-stats').innerHTML =
     '<div class="stat"><div class="k">สินค้าที่ใช้งาน</div><div class="v">' + num(sum.item_count, 0) + '</div></div>' +
     '<div class="stat' + (sum.low_count > 0 ? ' alert' : '') + '"><div class="k">ใกล้หมด</div><div class="v">' + num(sum.low_count, 0) + '</div></div>' +
     '<div class="stat"><div class="k">มูลค่าสต๊อก (ทุน)</div><div class="v">' + money(sum.total_value) + '</div></div>' +
@@ -529,14 +540,14 @@ async function loadDash(){
   if (b) lq = lq.eq('branch_id', b);
   var low = await q(lq);
   await loadUnits(low.map(function(r){ return r.product_id; }));
-  $('d-low').innerHTML = low.length ? '<table><tr><th>สินค้า</th><th>สาขา</th><th class="num">คงเหลือ</th><th class="num">จุดสั่งซื้อ</th></tr>' +
+  $h('d-low').innerHTML = low.length ? '<table><tr><th>สินค้า</th><th>สาขา</th><th class="num">คงเหลือ</th><th class="num">จุดสั่งซื้อ</th></tr>' +
     low.map(function(r){ return '<tr class="click" onclick="stockCard(' + r.product_id + ',' + r.branch_id + ')"><td><b>' + esc(r.sku) + '</b><div class="sub">' + esc(r.name) + '</div></td><td>' + esc(r.branch_name) + '</td><td class="num">' + qtyHtml(r.product_id, r.qty, r.base_unit_id, 'low') + '</td><td class="num">' + num(r.min_qty) + '</td></tr>'; }).join('') + '</table>'
     : '<p class="sub">ไม่มีสินค้าที่ต่ำกว่าจุดสั่งซื้อ</p>';
 
   var rq = sb.from('stock_docs').select('*').order('id', {ascending:false}).limit(10);
   if (b) rq = rq.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
   var docs = await q(rq);
-  $('d-docs').innerHTML = docs.length ? '<table><tr><th>เลขที่</th><th>ประเภท</th><th>สาขา</th><th>วันที่</th></tr>' +
+  $h('d-docs').innerHTML = docs.length ? '<table><tr><th>เลขที่</th><th>ประเภท</th><th>สาขา</th><th>วันที่</th></tr>' +
     docs.map(function(d){ return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + esc(d.doc_no) + '</td><td>' + badge(d.doc_type, d.cancelled) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</td><td>' + thDate(d.doc_date) + '</td></tr>'; }).join('') + '</table>'
     : '<p class="sub">ยังไม่มีเอกสาร</p>';
 }
@@ -571,7 +582,7 @@ async function loadStock(pg){
   SF.pg = pg;
   var r = await qc(stockQuery('*', {count:'exact'}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
   await loadUnits(r.data.map(function(x){ return x.product_id; }));
-  $('s-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หมวด</th><th>สาขา</th><th class="num">คงเหลือ</th><th class="num">จุดสั่งซื้อ</th><th class="num">มูลค่า (ทุน)</th></tr>' +
+  $h('s-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หมวด</th><th>สาขา</th><th class="num">คงเหลือ</th><th class="num">จุดสั่งซื้อ</th><th class="num">มูลค่า (ทุน)</th></tr>' +
     (r.data.length ? r.data.map(function(x){
       return '<tr class="click" onclick="stockCard(' + x.product_id + ',' + x.branch_id + ')"><td><b>' + esc(x.sku) + '</b></td><td>' + esc(x.name) + '</td><td>' + esc(x.category_name || '-') + '</td><td>' + esc(x.branch_name) +
         '</td><td class="num">' + qtyHtml(x.product_id, x.qty, x.base_unit_id, x.is_low ? 'low' : '') + '</td><td class="num">' + (Number(x.min_qty) ? num(x.min_qty) : '-') + '</td><td class="num">' + money(x.stock_value) + '</td></tr>';
@@ -635,7 +646,7 @@ function prodQuery(cols, opts){
 async function loadProducts(pg){
   var r = await qc(prodQuery('*', {count:'exact'}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
   await loadUnits(r.data.map(function(x){ return x.id; }));
-  $('p-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หมวด</th><th>หน่วย</th><th class="num">ต้นทุน</th><th class="num">ราคาขาย</th><th class="num">จุดสั่งซื้อ</th><th></th></tr>' +
+  $h('p-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หมวด</th><th>หน่วย</th><th class="num">ต้นทุน</th><th class="num">ราคาขาย</th><th class="num">จุดสั่งซื้อ</th><th></th></tr>' +
     (r.data.length ? r.data.map(function(p){
       var units = (PU[p.id] || []).map(function(u){ return esc(u.name) + (u.factor !== 1 ? '=' + num(u.factor) : ''); }).join(', ');
       return '<tr' + (isMgr() ? ' class="click" onclick="editProduct(' + p.id + ')"' : '') + '><td><b>' + esc(p.sku) + '</b></td><td>' + esc(p.name) + (p.active ? '' : ' <span class="b b-x">ปิดใช้งาน</span>') + '</td><td>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') +
@@ -683,7 +694,7 @@ function pfBase(){
   pfRender();
 }
 function pfRender(){
-  $('pf-units').innerHTML = '<tr><th>หน่วย</th><th class="num">เท่ากับ (หน่วยฐาน)</th><th>บาร์โค้ด</th><th></th></tr>' + PF.units.map(function(u, i){
+  $h('pf-units').innerHTML = '<tr><th>หน่วย</th><th class="num">เท่ากับ (หน่วยฐาน)</th><th>บาร์โค้ด</th><th></th></tr>' + PF.units.map(function(u, i){
     var isBase = u.unit_id === PF.base_unit_id;
     return '<tr><td>' + (isBase ? '<b>' + esc(uname(u.unit_id)) + '</b> <span class="sub">(ฐาน)</span>' : '<select data-i="' + i + '" data-k="unit_id">' + unitOptions(u.unit_id) + '</select>') + '</td>' +
       '<td class="num">' + (isBase ? '1' : '<input class="qty" type="number" step="any" min="0" data-i="' + i + '" data-k="factor" value="' + (u.factor || '') + '">') + '</td>' +
@@ -795,6 +806,7 @@ PAGES.txn = async function(){
   if (!myBranches().some(function(b){ return b.id === T.branch; })) T.branch = S.cur;
   if (T.type === 'ADJUST' && !isMgr()) T.type = 'IN';
   await loadUnits(T.lines.map(function(l){ return l.pid; }));
+  if (curPage !== 'txn') return;
   renderTxn();
 };
 function setTxnType(t){ readTxnHead(); T.type = t; saveTxn(); renderTxn(); }
@@ -846,7 +858,7 @@ function renderTxnLines(){
       (cost ? '<td class="num"><input class="qty" type="number" step="any" data-i="' + i + '" data-k="cost" value="' + esc(l.cost == null ? '' : l.cost) + '" placeholder="-"></td>' : '') +
       '<td class="num" id="t-info-' + i + '"></td><td><button class="x" onclick="delTxnLine(' + i + ')">×</button></td></tr>';
   }).reverse().join('') : '<tr><td colspan="7" class="empty">ยังไม่มีรายการ — สแกนบาร์โค้ดหรือค้นหาสินค้าด้านบน</td></tr>';
-  $('t-tbl').innerHTML = html;
+  $h('t-tbl').innerHTML = html;
   T.lines.forEach(function(_, i){ txnInfo(i); }); txnSum();
 }
 function txnNeed(pid){ // จำนวนรวม (หน่วยฐาน) ของสินค้าเดียวกันในเอกสาร
@@ -933,7 +945,7 @@ async function loadDocs(pg){
   else if (b) qb = qb.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
   else if (t) qb = qb.or('doc_no.ilike.%' + t + '%,ref_no.ilike.%' + t + '%');
   var r = await qc(qb.order('id', {ascending:false}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
-  $('d-res').innerHTML = '<table><tr><th>เลขที่</th><th>ประเภท</th><th>วันที่</th><th>สาขา</th><th>อ้างอิง</th><th>หมายเหตุ</th></tr>' +
+  $h('d-res').innerHTML = '<table><tr><th>เลขที่</th><th>ประเภท</th><th>วันที่</th><th>สาขา</th><th>อ้างอิง</th><th>หมายเหตุ</th></tr>' +
     (r.data.length ? r.data.map(function(d){
       return '<tr class="click" onclick="showDoc(' + d.id + ')"><td><b>' + esc(d.doc_no) + '</b></td><td>' + badge(d.doc_type, d.cancelled) + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
         '</td><td>' + esc(d.ref_no || '') + '</td><td>' + esc(d.note || '') + '</td></tr>';
@@ -1011,6 +1023,7 @@ PAGES.count = async function(){
   var br = (C && C.branch) || S.cur;
   C = {branch:br, rows:ls.get('count_draft_' + br, []), bal:{}, hide:C ? C.hide : false, zero:false};
   await loadUnits(C.rows.map(function(r){ return r.pid; }));
+  if (curPage !== 'count') return;
   page('<div class="ph"><h1>ตรวจนับสต๊อก</h1></div>' +
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('c-br', {value:C.branch}) + '</label>' +
     '<label class="f">หมวดหมู่ <select id="c-cat">' + catOptions('') + '</select></label><button class="btn" onclick="countLoadCat()">โหลดรายการสินค้า</button>' +
@@ -1051,7 +1064,7 @@ function renderCount(){
       '<td class="num" id="c-tot-' + i + '"></td>' + (C.hide ? '' : '<td class="num" id="c-diff-' + i + '"></td>') +
       '<td><button class="x" onclick="C.rows.splice(' + i + ',1);saveCount();renderCount()">×</button></td></tr>';
   }).join('') : '<tr><td colspan="6" class="empty">สแกนสินค้าที่นับ หรือกด "โหลดรายการสินค้า" ตามหมวด</td></tr>';
-  $('c-tbl').innerHTML = html;
+  $h('c-tbl').innerHTML = html;
   C.rows.forEach(function(_, i){ countCells(i); });
 }
 function countCells(i){
@@ -1127,7 +1140,7 @@ async function runReport(){
       RPT.forEach(function(r){ var a = adj[r.product_id]; if (a) { r.qty_in = Number(r.qty_in) - a.i; r.qty_out = Number(r.qty_out) - a.o; } });
     }
     var tot = RPT.reduce(function(s, r){ return s + Number(r.closing_value); }, 0);
-    $('r-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หน่วย</th><th class="num">ยกมา</th><th class="num">รับเข้า</th><th class="num">จ่ายออก</th><th class="num">คงเหลือ</th><th class="num">มูลค่า (ทุน)</th></tr>' +
+    $h('r-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หน่วย</th><th class="num">ยกมา</th><th class="num">รับเข้า</th><th class="num">จ่ายออก</th><th class="num">คงเหลือ</th><th class="num">มูลค่า (ทุน)</th></tr>' +
       (RPT.length ? RPT.map(function(r){
         return '<tr class="click" onclick="stockCard(' + r.product_id + ',' + (b || S.cur) + ')"><td><b>' + esc(r.sku) + '</b></td><td>' + esc(r.name) + '</td><td>' + esc(r.unit_name) + '</td><td class="num">' + num(r.opening) + '</td><td class="num okc">' + num(r.qty_in) +
           '</td><td class="num low">' + num(r.qty_out) + '</td><td class="num"><b>' + num(r.closing) + '</b></td><td class="num">' + money(r.closing_value) + '</td></tr>';
@@ -1163,6 +1176,7 @@ async function exportMoves(src){
 PAGES.settings = async function(){
   if (!isMgr()) return page('<p>เฉพาะผู้จัดการขึ้นไป</p>');
   await loadMaster();
+  if (curPage !== 'settings') return;
   var html = '<div class="ph"><h1>ตั้งค่า</h1></div>';
   if (isAdmin()) {
     html += '<div class="card"><h3>สาขา</h3><div class="tbl-wrap"><table><tr><th>รหัส</th><th>ชื่อสาขา</th><th>สถานะ</th><th></th></tr>' +
@@ -1182,7 +1196,7 @@ PAGES.settings = async function(){
 async function loadUsers(){
   var users = await q(sb.from('profiles').select('*').order('created_at'));
   var bo = function(v){ return '<option value="">— ทุกสาขา (เฉพาะผู้ดูแล) —</option>' + S.branches.map(function(b){ return '<option value="' + b.id + '"' + (b.id === v ? ' selected' : '') + '>' + esc(b.name) + '</option>'; }).join(''); };
-  $('u-res').innerHTML = '<table><tr><th>ผู้ใช้</th><th>บทบาท</th><th>สาขา</th><th>อนุมัติ</th><th></th></tr>' + users.map(function(u){
+  $h('u-res').innerHTML = '<table><tr><th>ผู้ใช้</th><th>บทบาท</th><th>สาขา</th><th>อนุมัติ</th><th></th></tr>' + users.map(function(u){
     var self = u.id === me.id;
     return '<tr><td><b>' + esc(u.full_name || '-') + '</b><div class="sub">' + esc(u.email) + '</div></td>' +
       '<td><select id="ur-' + u.id + '"' + (self ? ' disabled' : '') + '>' + Object.keys(ROLE).map(function(k){ return '<option value="' + k + '"' + (u.role === k ? ' selected' : '') + '>' + ROLE[k] + '</option>'; }).join('') + '</select></td>' +
