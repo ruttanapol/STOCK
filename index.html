@@ -84,6 +84,8 @@ td input.qty{width:100px;text-align:right}
 .pick{position:relative}
 .pick input{width:100%}
 .sug{position:absolute;left:0;right:0;top:100%;margin-top:4px;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(16,24,40,.12);z-index:30;max-height:320px;overflow:auto}
+.sug::-webkit-scrollbar{width:10px}.sug::-webkit-scrollbar-thumb{background:#c5cad3;border-radius:6px;border:2px solid #fff}.sug::-webkit-scrollbar-thumb:hover{background:#9aa1ad}
+.sug{overscroll-behavior:contain}
 .sug-i{padding:8px 12px;cursor:pointer;border-bottom:1px solid #f1f2f4}
 .sug-i:hover{background:var(--pri-soft)}
 .sug-e{padding:10px 12px;color:var(--muted)}
@@ -245,6 +247,7 @@ function errMsg(e){
   if (/foreign key/i.test(m)) return 'ลบไม่ได้ เพราะมีข้อมูลอื่นใช้งานอยู่';
   if (/row-level security|permission denied/i.test(m)) return 'ไม่มีสิทธิ์ทำรายการนี้';
   if (/Failed to fetch|NetworkError/i.test(m)) return 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบอินเทอร์เน็ต';
+  if (/count_sessions|count_lines|submit_count|approve_count|reject_count/i.test(m)) return 'ยังไม่ได้เปิดใช้การตรวจนับแบบรออนุมัติ กรุณารันไฟล์ update_count_review.sql ใน Supabase ก่อน';
   if (/Bucket not found|set_product_image|image_url/i.test(m)) return 'ยังไม่ได้เปิดใช้รูปสินค้า กรุณารันไฟล์ update_images.sql ใน Supabase ก่อน';
   if (/Invalid login credentials/i.test(m)) return 'อีเมลหรือรหัสผ่านไม่ถูกต้อง';
   if (/Email not confirmed/i.test(m)) return 'ยังไม่ได้ยืนยันอีเมล กรุณาตรวจสอบกล่องจดหมาย';
@@ -341,9 +344,9 @@ async function loadUnits(ids){
   for (var i = 0; i < need.length; i += 150) {
     var chunk = need.slice(i, i + 150);
     var rows = await q(sb.from('product_units').select('product_id,unit_id,factor,barcode').in('product_id', chunk));
-    chunk.forEach(function(id){ PU[id] = []; });
-    rows.forEach(function(r){ PU[r.product_id].push({unit_id:r.unit_id, factor:Number(r.factor), barcode:r.barcode, name:uname(r.unit_id)}); });
-    chunk.forEach(function(id){ PU[id].sort(function(a, b){ return b.factor - a.factor; }); });
+    var got = {}; chunk.forEach(function(id){ got[id] = []; });
+    rows.forEach(function(r){ if (got[r.product_id]) got[r.product_id].push({unit_id:r.unit_id, factor:Number(r.factor), barcode:r.barcode, name:uname(r.unit_id)}); });
+    chunk.forEach(function(id){ PU[id] = got[id].sort(function(a, b){ return b.factor - a.factor; }); });
   }
 }
 function factorOf(pid, uid){ var u = (PU[pid] || []).find(function(x){ return x.unit_id == uid; }); return u ? u.factor : 1; }
@@ -399,11 +402,14 @@ function attachPicker(inputId, onPick){
       } catch(e){}
     }, 300);
   });
+  // กดที่รายการ (รวมถึงแถบเลื่อน) ต้องไม่ทำให้ช่องค้นหาหลุดโฟกัส ไม่อย่างนั้นรายการจะปิดตอนลากแถบเลื่อนบนคอม
   box.addEventListener('mousedown', function(e){
-    var el = e.target.closest('.sug-i'); if (!el) return; e.preventDefault();
+    e.preventDefault();
+    var el = e.target.closest('.sug-i'); if (!el) return;
     var p = items[Number(el.dataset.i)]; inp.value = ''; hide(); onPick(p, null);
   });
-  inp.addEventListener('blur', function(){ setTimeout(hide, 150); });
+  inp.addEventListener('blur', function(){ setTimeout(function(){ if (!box.matches(':hover')) hide(); }, 150); });
+  document.addEventListener('mousedown', function(e){ if (!box.contains(e.target) && e.target !== inp) hide(); });
   inp.addEventListener('keydown', async function(e){
     if (e.key !== 'Enter') return;
     e.preventDefault(); clearTimeout(timer);
@@ -500,7 +506,7 @@ async function loadMaster(){
 // ---------- เมนู ----------
 var NAV = [
   ['dash','แดชบอร์ด'], ['stock','สินค้าคงเหลือ'], ['txn','ทำรายการ'], ['docs','ประวัติเอกสาร'],
-  ['products','รายการสินค้า'], ['count','ตรวจนับสต๊อก', 'mgr'], ['report','รายงาน'], ['settings','ตั้งค่า', 'mgr']
+  ['products','รายการสินค้า'], ['count','ตรวจนับสต๊อก'], ['report','รายงาน'], ['settings','ตั้งค่า', 'mgr']
 ];
 function buildNav(){
   $('nav').innerHTML = NAV.filter(function(n){ return !n[2] || isMgr(); }).map(function(n){ return '<a data-p="' + n[0] + '" onclick="go(\'' + n[0] + '\')">' + n[1] + '</a>'; }).join('');
@@ -1204,23 +1210,37 @@ function printDoc(){
 //  ตรวจนับสต๊อก
 // ============================================================
 var C = null;
+var CSTAT = {pending:'รอตรวจ', approved:'อนุมัติแล้ว', rejected:'ไม่อนุมัติ'};
 function saveCount(){ if (C) ls.set('count_draft_' + C.branch, C.rows); }
+function countTabs(){
+  return '<div class="seg">' + [['count','นับสต๊อก'],['pending','รอตรวจ' + (C.pendingN ? ' (' + C.pendingN + ')' : '')],['history','ประวัติการตรวจนับ']]
+    .map(function(t){ return '<button class="' + (C.tab === t[0] ? 'on' : '') + '" onclick="setCountTab(\'' + t[0] + '\')">' + t[1] + '</button>'; }).join('') + '</div>';
+}
+function setCountTab(t){ C.tab = t; PAGES.count(); }
+async function countPendingN(){
+  try {
+    var qb = sb.from('count_sessions').select('id', {count:'exact', head:true}).eq('status', 'pending');
+    if (!isAdmin()) qb = qb.eq('branch_id', me.branch_id);
+    var r = await qb; C.pendingN = r.count || 0;
+  } catch(e){ C.pendingN = 0; }
+}
 PAGES.count = async function(){
-  if (!isMgr()) return page('<p>เฉพาะผู้จัดการขึ้นไป</p>');
   var br = (C && C.branch) || S.cur;
-  C = {branch:br, rows:ls.get('count_draft_' + br, []), bal:{}, hide:C ? C.hide : false, zero:false};
-  await loadUnits(C.rows.map(function(r){ return r.pid; }));
+  C = {branch:br, rows:ls.get('count_draft_' + br, []), bal:{}, hide:C ? C.hide : false, zero:false, tab:(C && C.tab) || 'count', pendingN:C ? C.pendingN : 0};
+  await Promise.all([loadUnits(C.rows.map(function(r){ return r.pid; })), countPendingN()]);
   if (curPage !== 'count') return;
-  page('<div class="ph"><h1>ตรวจนับสต๊อก</h1></div>' +
+  if (C.tab !== 'count') return renderSessions();
+  page('<div class="ph"><h1>ตรวจนับสต๊อก</h1></div>' + countTabs() +
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('c-br', {value:C.branch}) + '</label>' +
-    '<label class="f">หมวดหมู่ <select id="c-cat">' + catOptions('') + '</select></label><button class="btn" onclick="countLoadCat()">โหลดรายการสินค้า</button>' +
+    '<label class="f">หมวดหมู่ <select id="c-cat">' + catOptions('') + '</select></label><button class="btn" onclick="countLoadCat()">โหลดรายการสินค้า</button><button class="btn" onclick="printCountSheet()">พิมพ์ใบนับ</button>' +
     '<label class="chk"><input type="checkbox" id="c-hide"' + (C.hide ? ' checked' : '') + '> ซ่อนยอดในระบบ (นับแบบไม่เห็นยอด)</label></div>' +
     '<div class="row" style="margin-top:14px"><div class="pick grow"><input id="c-scan" placeholder="สแกนบาร์โค้ด = นับเพิ่ม 1 ตามหน่วยของบาร์โค้ด หรือพิมพ์ค้นหา" autocomplete="off"></div>' +
     '<button class="btn" onclick="openScanner(countCode)">สแกนด้วยกล้อง</button></div>' +
-    '<p class="sub">ร่างการนับจะถูกเก็บไว้ในเครื่องนี้อัตโนมัติ ปิดหน้าแล้วกลับมานับต่อได้</p></div>' +
+    '<p class="sub">ร่างการนับเก็บไว้ในเครื่องนี้อัตโนมัติ ปิดหน้าแล้วกลับมานับต่อได้ · กด "ส่งผลตรวจนับ" แล้วยอดยังไม่เปลี่ยน จนกว่าผู้จัดการจะอนุมัติ</p></div>' +
     '<div class="card"><div class="tbl-wrap"><table id="c-tbl"></table></div>' +
+    '<div class="row" style="margin-top:12px"><label class="f grow">หมายเหตุถึงผู้ตรวจ <input id="c-note" placeholder="เช่น นับตู้แช่ 1-2"></label></div>' +
     '<div class="row end"><label class="chk" style="margin-right:auto"><input type="checkbox" id="c-zero"> รายการที่ไม่ได้กรอก ให้ถือว่านับได้ 0</label>' +
-    '<button class="btn ghost" onclick="clearCount()">ล้างการนับ</button><button class="btn pri" onclick="submitCount()">บันทึกผลตรวจนับ</button></div></div>');
+    '<button class="btn ghost" onclick="clearCount()">ล้างการนับ</button><button class="btn pri" onclick="submitCount()">ส่งผลตรวจนับ</button></div></div>');
   $('c-br').onchange = function(){ saveCount(); C.branch = selNum('c-br'); C.rows = ls.get('count_draft_' + C.branch, []); loadUnits(C.rows.map(function(r){ return r.pid; })).then(countBal); };
   $('c-hide').onchange = function(){ C.hide = this.checked; renderCount(); };
   $('c-zero').onchange = function(){ C.zero = this.checked; };
@@ -1230,7 +1250,7 @@ PAGES.count = async function(){
     C.rows[i].counts[u] = e.target.value; saveCount(); countCells(Number(i));
   });
   await countBal();
-  $('c-scan').focus();
+  if ($('c-scan')) $('c-scan').focus();
 };
 async function countBal(){
   var pids = C.rows.map(function(r){ return r.pid; }); C.bal = {};
@@ -1243,14 +1263,14 @@ async function countBal(){
 function rowTotal(r){ return (PU[r.pid] || []).reduce(function(s, u){ var v = r.counts[u.unit_id]; return s + (v === '' || v == null ? 0 : Number(v) * u.factor); }, 0); }
 function touched(r){ return Object.keys(r.counts).some(function(k){ return r.counts[k] !== '' && r.counts[k] != null; }); }
 function renderCount(){
-  var html = '<tr><th>สินค้า</th>' + (C.hide ? '' : '<th class="num">ยอดในระบบ</th>') + '<th>จำนวนที่นับได้</th><th class="num">รวม (หน่วยฐาน)</th>' + (C.hide ? '' : '<th class="num">ผลต่าง</th>') + '<th></th></tr>';
+  var html = '<tr><th>#</th><th>สินค้า</th>' + (C.hide ? '' : '<th class="num">ยอดในระบบ</th>') + '<th>จำนวนที่นับได้</th><th class="num">รวม (หน่วยฐาน)</th>' + (C.hide ? '' : '<th class="num">ผลต่าง</th>') + '<th></th></tr>';
   html += C.rows.length ? C.rows.map(function(r, i){
-    return '<tr id="c-row-' + i + '"><td>' + pcell(r.img, esc(r.sku), esc(r.name)) + '</td>' +
+    return '<tr id="c-row-' + i + '"><td class="sub">' + (i + 1) + '</td><td>' + pcell(r.img, esc(r.sku), esc(r.name)) + '</td>' +
       (C.hide ? '' : '<td class="num">' + qtyHtml(r.pid, C.bal[r.pid] || 0, r.base_unit_id) + '</td>') +
       '<td>' + (PU[r.pid] || []).map(function(u){ var v = r.counts[u.unit_id]; return '<label class="uc"><input type="number" min="0" step="any" data-i="' + i + '" data-u="' + u.unit_id + '" value="' + (v == null ? '' : esc(v)) + '">' + esc(u.name) + '</label>'; }).join('') + '</td>' +
       '<td class="num" id="c-tot-' + i + '"></td>' + (C.hide ? '' : '<td class="num" id="c-diff-' + i + '"></td>') +
       '<td><button class="x" onclick="C.rows.splice(' + i + ',1);saveCount();renderCount()">×</button></td></tr>';
-  }).join('') : '<tr><td colspan="6" class="empty">สแกนสินค้าที่นับ หรือกด "โหลดรายการสินค้า" ตามหมวด</td></tr>';
+  }).join('') : '<tr><td colspan="7" class="empty">เลือกหมวดหมู่แล้วกด "โหลดรายการสินค้า" เพื่อเตรียมรายการตามลำดับก่อนนับ<br>หรือสแกนสินค้าที่นับทีละรายการ</td></tr>';
   $h('c-tbl').innerHTML = html;
   C.rows.forEach(function(_, i){ countCells(i); });
 }
@@ -1267,10 +1287,12 @@ async function addCountRow(p, unitId){
     C.rows.unshift({pid:p.id, sku:p.sku, name:p.name, img:p.image_url || null, base_unit_id:p.base_unit_id, counts:{}}); i = 0;
     var b = await q(sb.from('stock_balances').select('qty').eq('branch_id', C.branch).eq('product_id', p.id).maybeSingle());
     C.bal[p.id] = b ? Number(b.qty) : 0;
-  } else if (i > 0) { C.rows.unshift(C.rows.splice(i, 1)[0]); i = 0; }
-  if (unitId) { var cur = C.rows[0].counts[unitId]; C.rows[0].counts[unitId] = Number(cur || 0) + 1; }
+  }
+  // สินค้าที่อยู่ในรายการแล้ว ไม่ย้ายตำแหน่ง เพื่อให้ลำดับการนับคงเดิม
+  if (unitId) { var cur = C.rows[i].counts[unitId]; C.rows[i].counts[unitId] = Number(cur || 0) + 1; }
   beep(true); saveCount(); renderCount();
-  var row = $('c-row-0'); if (row) { row.classList.add('flash'); if (!unitId) { var inp = row.querySelector('input'); if (inp) inp.focus(); } }
+  var row = $('c-row-' + i);
+  if (row) { row.classList.add('flash'); row.scrollIntoView({block:'center', behavior:'smooth'}); if (!unitId) { var inp = row.querySelector('input'); if (inp) inp.focus(); } }
 }
 async function countCode(code){
   try { var r = await findByCode(code); if (r) addCountRow(r.p, r.unit_id); else { beep(false); toast('ไม่พบสินค้า: ' + code, 'bad'); } }
@@ -1288,19 +1310,174 @@ async function countLoadCat(){
     saveCount(); await countBal();
   });
 }
+// ใบนับสต๊อกแบบกระดาษ: เรียงตามรายการบนหน้าจอ ไม่แสดงยอดในระบบ (นับแบบไม่เห็นยอด)
+function printCountSheet(){
+  if (!C.rows.length) return toast('โหลดรายการสินค้าก่อน แล้วค่อยพิมพ์ใบนับ', 'bad');
+  var w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
+  var maxU = Math.max.apply(null, C.rows.map(function(r){ return (PU[r.pid] || []).length || 1; }));
+  var rows = C.rows.map(function(r, i){
+    var us = (PU[r.pid] || []).map(function(u){ return '<td class="u">........ ' + esc(u.name) + '</td>'; });
+    while (us.length < maxU) us.push('<td></td>');
+    return '<tr><td class="c">' + (i + 1) + '</td><td>' + (r.img ? '<img src="' + esc(r.img) + '">' : '') + '</td><td>' + esc(r.sku) + '</td><td>' + esc(r.name) + '</td>' + us.join('') + '<td></td></tr>';
+  }).join('');
+  w.document.write('<html><head><meta charset="utf-8"><title>ใบนับสต๊อก</title><style>@page{size:A4;margin:10mm}body{font-family:sans-serif;font-size:12px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #999;padding:4px 5px;vertical-align:middle}th{background:#eee}tr{break-inside:avoid}.c{text-align:center}.u{white-space:nowrap;color:#555}img{width:34px;height:34px;object-fit:cover;display:block}</style></head><body>' +
+    '<h2 style="margin:0 0 4px">ใบนับสต๊อก · ' + esc(bname(C.branch)) + '</h2><p style="margin:0 0 8px">วันที่ ............................ ผู้นับ ............................ (' + C.rows.length + ' รายการ)</p>' +
+    '<table><tr><th>#</th><th>รูป</th><th>รหัส</th><th>สินค้า</th><th colspan="' + maxU + '">จำนวนที่นับได้</th><th style="width:18%">หมายเหตุ</th></tr>' + rows + '</table>' +
+    '<script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script></body></html>');
+  w.document.close();
+}
 function clearCount(){ if (C.rows.length && !confirm('ล้างข้อมูลการนับทั้งหมดของสาขานี้?')) return; C.rows = []; saveCount(); renderCount(); }
 async function submitCount(){
   var rows = C.rows.filter(function(r){ return C.zero || touched(r); });
   if (!rows.length) return toast('ยังไม่ได้กรอกจำนวนที่นับ', 'bad');
   var diffN = rows.filter(function(r){ return Math.abs(rowTotal(r) - (C.bal[r.pid] || 0)) > 1e-9; }).length;
-  if (!confirm('บันทึกผลตรวจนับ ' + rows.length + ' รายการ ที่ ' + bname(C.branch) + '\nมีผลต่าง ' + diffN + ' รายการ ระบบจะปรับยอดให้ตรงกับที่นับได้')) return;
+  if (!confirm('ส่งผลตรวจนับ ' + rows.length + ' รายการ ที่ ' + bname(C.branch) + '\nมีผลต่าง ' + diffN + ' รายการ\n\nยอดในระบบจะยังไม่เปลี่ยน จนกว่าผู้จัดการจะตรวจและกดอนุมัติ')) return;
+  var note = $('c-note') ? $('c-note').value.trim() : '';
   await busy(async function(){
-    var doc = await q(sb.rpc('post_stock_count', {p_branch:C.branch, p_doc_date:today(), p_note:null,
+    var s = await q(sb.rpc('submit_count', {p_branch:C.branch, p_note:note || null,
       p_lines: rows.map(function(r){ return {product_id:r.pid, counted_base:rowTotal(r)}; })}));
     var done = {}; rows.forEach(function(r){ done[r.pid] = 1; });
     C.rows = C.rows.filter(function(r){ return !done[r.pid]; }); saveCount();
-    toast('บันทึกผลตรวจนับแล้ว ' + doc.doc_no); await countBal(); showDoc(doc.id);
+    toast('ส่งผลตรวจนับแล้ว รอผู้จัดการตรวจ'); C.tab = 'pending'; await PAGES.count(); openCountReview(s.id);
   });
+}
+
+// ---------- รายการรอตรวจ / ประวัติ ----------
+async function renderSessions(){
+  var pend = C.tab === 'pending';
+  page('<div class="ph"><h1>ตรวจนับสต๊อก</h1></div>' + countTabs() +
+    '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('cs-br', {all:true, value: isAdmin() ? '' : C.branch}) + '</label>' +
+    (pend ? '' : '<label class="f">สถานะ <select id="cs-st"><option value="">ทั้งหมด</option><option value="approved">อนุมัติแล้ว</option><option value="rejected">ไม่อนุมัติ</option></select></label>') +
+    '</div></div><div class="card"><div class="tbl-wrap" id="cs-res"></div></div>');
+  $('cs-br').onchange = loadSessions; if ($('cs-st')) $('cs-st').onchange = loadSessions;
+  await loadSessions();
+}
+async function loadSessions(){
+  var b = selNum('cs-br'), pend = C.tab === 'pending';
+  var qb = sb.from('count_sessions').select('*, count_lines(count)').order('id', {ascending:false}).limit(100);
+  if (b) qb = qb.eq('branch_id', b);
+  if (pend) qb = qb.eq('status', 'pending');
+  else { var st = $('cs-st') && $('cs-st').value; qb = st ? qb.eq('status', st) : qb.neq('status', 'pending'); }
+  var rows = await q(qb);
+  $h('cs-res').innerHTML = '<table><tr><th>เลขที่</th><th>สาขา</th><th>นับโดย</th><th>ส่งเมื่อ</th><th class="num">รายการ</th><th>สถานะ</th><th>หมายเหตุ</th></tr>' +
+    (rows.length ? rows.map(function(s){
+      var n = s.count_lines && s.count_lines[0] ? s.count_lines[0].count : 0;
+      return '<tr class="click" onclick="openCountReview(' + s.id + ')"><td><b>CNT-' + s.id + '</b></td><td>' + esc(bname(s.branch_id)) + '</td><td>' + esc(s.counted_by_name || '-') + '</td><td>' + thDateTime(s.created_at) +
+        '</td><td class="num">' + num(n, 0) + '</td><td>' + stBadge(s.status) + (s.reviewed_by_name ? '<div class="sub">' + esc(s.reviewed_by_name) + '</div>' : '') + '</td><td>' + esc(s.note || '') + '</td></tr>';
+    }).join('') : '<tr><td colspan="7" class="empty">' + (pend ? 'ไม่มีรายการรอตรวจ' : 'ยังไม่มีประวัติ') + '</td></tr>') + '</table>';
+}
+function stBadge(st){ return '<span class="b ' + (st === 'approved' ? 'b-IN' : st === 'rejected' ? 'b-OUT' : 'b-ADJUST') + '">' + CSTAT[st] + '</span>'; }
+
+// ---------- หน้าตรวจรายการ (รายงานส่วนต่าง) ----------
+var CR = null;
+async function openCountReview(id){
+  await busy(async function(){
+    var s = await q(sb.from('count_sessions').select('*').eq('id', id).single());
+    var lines = await fetchAll(function(){ return sb.from('count_lines').select('product_id,system_base,counted_base,products(sku,name,base_unit_id,cost,image_url)').eq('session_id', id).order('id'); });
+    var pids = lines.map(function(l){ return l.product_id; }), now = {};
+    await loadUnits(pids);
+    if (s.status === 'pending') {
+      for (var i = 0; i < pids.length; i += 200) {
+        (await q(sb.from('stock_balances').select('product_id,qty').eq('branch_id', s.branch_id).in('product_id', pids.slice(i, i + 200))))
+          .forEach(function(r){ now[r.product_id] = Number(r.qty); });
+      }
+    }
+    CR = {s:s, lines:lines.map(function(l){ var p = l.products || {}; return {pid:l.product_id, sku:p.sku, name:p.name, img:p.image_url, unit:p.base_unit_id, cost:Number(p.cost || 0),
+      sys:Number(l.system_base), cnt:Number(l.counted_base), orig:Number(l.counted_base), now:now[l.product_id] || 0}; }), onlyDiff:false};
+    renderCountReview();
+  });
+}
+function crCalc(){
+  var t = {n:CR.lines.length, same:0, shortN:0, shortV:0, overN:0, overV:0, net:0};
+  CR.lines.forEach(function(l){ var d = l.cnt - l.sys, v = d * l.cost;
+    if (Math.abs(d) < 1e-9) t.same++; else if (d < 0) { t.shortN++; t.shortV += v; } else { t.overN++; t.overV += v; } t.net += v; });
+  return t;
+}
+function crSummaryHtml(){
+  var t = crCalc();
+  return '<div class="stat"><div class="k">รายการที่นับ</div><div class="v">' + num(t.n, 0) + '</div></div>' +
+    '<div class="stat"><div class="k">ตรงกับระบบ</div><div class="v okc">' + num(t.same, 0) + '</div></div>' +
+    '<div class="stat"><div class="k">ขาด (ของจริงน้อยกว่า)</div><div class="v low">' + num(t.shortN, 0) + '</div><div class="sub">' + money(t.shortV) + ' บาท</div></div>' +
+    '<div class="stat"><div class="k">เกิน (ของจริงมากกว่า)</div><div class="v okc">' + num(t.overN, 0) + '</div><div class="sub">+' + money(t.overV) + ' บาท</div></div>' +
+    '<div class="stat"><div class="k">มูลค่าส่วนต่างสุทธิ</div><div class="v ' + (t.net < 0 ? 'low' : '') + '">' + (t.net > 0 ? '+' : '') + money(t.net) + '</div></div>';
+}
+function renderCountReview(){
+  var s = CR.s, pend = s.status === 'pending', edit = pend && isMgr();
+  openModal('<h2>ตรวจนับ CNT-' + s.id + ' ' + stBadge(s.status) + '</h2>' +
+    '<dl class="dl"><dt>สาขา</dt><dd>' + esc(bname(s.branch_id)) + '</dd><dt>นับโดย</dt><dd>' + esc(s.counted_by_name || '-') + ' · ' + thDateTime(s.created_at) + '</dd>' +
+    (s.note ? '<dt>หมายเหตุ</dt><dd>' + esc(s.note) + '</dd>' : '') +
+    (s.reviewed_at ? '<dt>' + (s.status === 'approved' ? 'อนุมัติโดย' : 'ไม่อนุมัติโดย') + '</dt><dd>' + esc(s.reviewed_by_name || '-') + ' · ' + thDateTime(s.reviewed_at) + (s.review_note ? ' · ' + esc(s.review_note) : '') + '</dd>' : '') + '</dl>' +
+    '<div class="stats" id="cr-sum">' + crSummaryHtml() + '</div>' +
+    (pend ? '<p class="hint" style="margin-bottom:12px">เมื่ออนุมัติ ระบบจะปรับยอดตาม <b>ผลต่าง ณ เวลาที่นับ</b> รายการรับเข้า/จ่ายออกที่เกิดขึ้นระหว่างรออนุมัติจะไม่ถูกทับ' + (edit ? ' · แก้ช่อง "นับได้" ได้ถ้าพบว่านับผิด' : '') + '</p>' : '') +
+    '<label class="chk" style="margin-bottom:8px"><input type="checkbox" id="cr-only"' + (CR.onlyDiff ? ' checked' : '') + ' onchange="CR.onlyDiff=this.checked;crTable()"> แสดงเฉพาะรายการที่มีผลต่าง</label>' +
+    '<div class="tbl-wrap"><table id="cr-tbl"></table></div>' +
+    (pend && edit ? '<label class="f" style="margin-top:12px">หมายเหตุของผู้ตรวจ <input id="cr-note"></label>' : '') +
+    '<div class="row end"><button class="btn" onclick="exportCountReview()">ส่งออก Excel</button><button class="btn" onclick="printCountReview()">พิมพ์</button>' +
+    (s.doc_id ? '<button class="btn" onclick="showDoc(' + s.doc_id + ')">ดูเอกสารปรับยอด</button>' : '') +
+    (edit ? '<button class="btn danger" onclick="rejectCount()">ไม่อนุมัติ</button><button class="btn pri" onclick="approveCount()">อนุมัติและปรับยอด</button>' : '') +
+    (pend && !isMgr() ? '<span class="sub">รอผู้จัดการตรวจและอนุมัติ</span>' : '') + '</div>', true);
+  crTable();
+  $('cr-tbl').addEventListener('input', function(e){
+    var i = e.target.dataset.i; if (i == null) return;
+    var v = e.target.value === '' ? 0 : Number(e.target.value); if (!isFinite(v) || v < 0) return;
+    CR.lines[i].cnt = v; crRow(Number(i)); $('cr-sum').innerHTML = crSummaryHtml();
+  });
+}
+function crTable(){
+  var s = CR.s, pend = s.status === 'pending', edit = pend && isMgr();
+  $h('cr-tbl').innerHTML = '<tr><th>สินค้า</th><th class="num">ยอดระบบตอนนับ</th><th class="num">นับได้</th><th class="num">ผลต่าง</th><th class="num">มูลค่าผลต่าง</th>' +
+    (pend ? '<th class="num">ยอดปัจจุบัน → หลังอนุมัติ</th>' : '') + '</tr>' +
+    CR.lines.map(function(l, i){
+      if (CR.onlyDiff && Math.abs(l.cnt - l.sys) < 1e-9) return '';
+      return '<tr><td>' + pcell(l.img, esc(l.name), esc(l.sku) + ' · ' + esc(uname(l.unit))) + '</td><td class="num">' + num(l.sys) + '</td>' +
+        '<td class="num">' + (edit ? '<input class="qty" type="number" min="0" step="any" data-i="' + i + '" value="' + l.cnt + '">' + (l.cnt !== l.orig ? '<div class="sub">เดิม ' + num(l.orig) + '</div>' : '') : num(l.cnt)) + '</td>' +
+        '<td class="num" id="cr-d-' + i + '"></td><td class="num" id="cr-v-' + i + '"></td>' + (pend ? '<td class="num" id="cr-n-' + i + '"></td>' : '') + '</tr>';
+    }).join('');
+  CR.lines.forEach(function(_, i){ crRow(i); });
+}
+function crRow(i){
+  var l = CR.lines[i], d = l.cnt - l.sys, el = $('cr-d-' + i); if (!el) return;
+  var cls = d < 0 ? 'low' : d > 0 ? 'okc' : '';
+  el.innerHTML = '<span class="' + cls + '">' + (d > 0 ? '+' : '') + num(d) + '</span>' + (breakdown(l.pid, d) ? '<div class="sub">' + esc(breakdown(l.pid, d)) + '</div>' : '');
+  $('cr-v-' + i).innerHTML = '<span class="' + cls + '">' + (d * l.cost > 0 ? '+' : '') + money(d * l.cost) + '</span>';
+  var n = $('cr-n-' + i); if (n) { var after = l.now + d; n.innerHTML = num(l.now) + ' → <b class="' + (after < 0 ? 'low' : '') + '">' + num(after) + '</b>'; }
+}
+async function approveCount(){
+  var t = crCalc(), edits = CR.lines.filter(function(l){ return l.cnt !== l.orig; });
+  var neg = CR.lines.filter(function(l){ return l.now + (l.cnt - l.sys) < 0; });
+  if (neg.length) return toast('มี ' + neg.length + ' รายการที่ยอดจะติดลบ (มีการจ่ายออกระหว่างรออนุมัติ) กรุณาไม่อนุมัติแล้วนับใหม่', 'bad');
+  if (!confirm('อนุมัติผลตรวจนับ CNT-' + CR.s.id + '\nขาด ' + t.shortN + ' รายการ, เกิน ' + t.overN + ' รายการ\nมูลค่าส่วนต่างสุทธิ ' + money(t.net) + ' บาท' + (edits.length ? '\nแก้ยอดนับ ' + edits.length + ' รายการ' : '') + '\n\nระบบจะปรับยอดสต๊อกทันที')) return;
+  await busy(async function(){
+    var s = await q(sb.rpc('approve_count', {p_session:CR.s.id, p_note:($('cr-note') && $('cr-note').value.trim()) || null,
+      p_overrides: edits.map(function(l){ return {product_id:l.pid, counted_base:l.cnt}; })}));
+    toast('อนุมัติแล้ว ปรับยอดสต๊อกเรียบร้อย'); closeModal(); if (curPage === 'count') await PAGES.count(); else await countPendingN();
+  });
+}
+async function rejectCount(){
+  var why = prompt('เหตุผลที่ไม่อนุมัติ (เช่น ให้นับใหม่)'); if (why === null) return;
+  await busy(async function(){
+    await q(sb.rpc('reject_count', {p_session:CR.s.id, p_note:why || null}));
+    toast('ไม่อนุมัติแล้ว ยอดสต๊อกไม่เปลี่ยน'); closeModal(); if (curPage === 'count') await PAGES.count();
+  });
+}
+function crRows(){
+  return CR.lines.map(function(l){ var d = l.cnt - l.sys;
+    return {'รหัส':l.sku, 'ชื่อสินค้า':l.name, 'หน่วย':uname(l.unit), 'ยอดระบบตอนนับ':l.sys, 'นับได้':l.cnt, 'ผลต่าง':d,
+      'ผล':Math.abs(d) < 1e-9 ? 'ตรง' : d < 0 ? 'ขาด' : 'เกิน', 'ต้นทุน/หน่วย':l.cost, 'มูลค่าผลต่าง':+(d * l.cost).toFixed(2)}; });
+}
+function exportCountReview(){ exportXlsx(crRows(), 'ผลตรวจนับ', 'ตรวจนับ_CNT-' + CR.s.id + '_' + bname(CR.s.branch_id) + '.xlsx'); }
+function printCountReview(){
+  var w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
+  var t = crCalc(), s = CR.s;
+  var rows = crRows().map(function(r, i){ var c = r['ผลต่าง'] < 0 ? ' style="color:#b42318"' : '';
+    return '<tr><td>' + (i + 1) + '</td><td>' + esc(r['รหัส']) + '</td><td>' + esc(r['ชื่อสินค้า']) + '</td><td>' + esc(r['หน่วย']) + '</td><td class="n">' + num(r['ยอดระบบตอนนับ']) + '</td><td class="n">' + num(r['นับได้']) +
+      '</td><td class="n"' + c + '>' + (r['ผลต่าง'] > 0 ? '+' : '') + num(r['ผลต่าง']) + '</td><td class="n"' + c + '>' + money(r['มูลค่าผลต่าง']) + '</td></tr>'; }).join('');
+  w.document.write('<html><head><meta charset="utf-8"><title>CNT-' + s.id + '</title><style>body{font-family:sans-serif;padding:20px;font-size:13px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #999;padding:5px}th{background:#eee}.n{text-align:right}.s{display:flex;justify-content:space-around;margin-top:50px}</style></head><body>' +
+    '<h2>รายงานผลตรวจนับสต๊อก CNT-' + s.id + ' (' + CSTAT[s.status] + ')</h2><p>สาขา ' + esc(bname(s.branch_id)) + ' · นับโดย ' + esc(s.counted_by_name || '-') + ' · ' + thDateTime(s.created_at) + (s.note ? '<br>หมายเหตุ ' + esc(s.note) : '') +
+    '<br>นับ ' + t.n + ' รายการ · ตรง ' + t.same + ' · ขาด ' + t.shortN + ' (' + money(t.shortV) + ' บาท) · เกิน ' + t.overN + ' (+' + money(t.overV) + ' บาท) · สุทธิ ' + money(t.net) + ' บาท</p>' +
+    '<table><tr><th>#</th><th>รหัส</th><th>สินค้า</th><th>หน่วย</th><th>ยอดระบบ</th><th>นับได้</th><th>ผลต่าง</th><th>มูลค่า</th></tr>' + rows + '</table>' +
+    '<div class="s"><div>ผู้นับ ...........................</div><div>ผู้ตรวจสอบ/อนุมัติ ...........................</div></div><script>window.onload=function(){window.print()}<\/script></body></html>');
+  w.document.close();
 }
 
 // ============================================================
