@@ -538,6 +538,7 @@ function pager(total, pg, fn){
     '<span>หน้า ' + (pg + 1) + ' / ' + pages + '</span>' +
     '<button class="btn sm" ' + (pg >= pages - 1 ? 'disabled' : '') + ' onclick="' + fn + '(' + (pg + 1) + ')">ถัดไป ›</button></div>';
 }
+function byName(d){ return d.created_by_name || (d.creator ? (d.creator.full_name || d.creator.email) : '') || '-'; }
 function badge(t, cancelled){ return '<span class="b ' + (cancelled ? 'b-x' : 'b-' + t) + '">' + TYPE[t] + (cancelled ? ' (ยกเลิก)' : '') + '</span>'; }
 
 // ============================================================
@@ -573,8 +574,8 @@ async function loadDash(){
   var rq = sb.from('stock_docs').select('*').order('id', {ascending:false}).limit(10);
   if (b) rq = rq.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
   var docs = await q(rq);
-  $h('d-docs').innerHTML = docs.length ? '<table><tr><th>เลขที่</th><th>ประเภท</th><th>สาขา</th><th>วันที่</th></tr>' +
-    docs.map(function(d){ return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + esc(d.doc_no) + '</td><td>' + badge(d.doc_type, d.cancelled) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</td><td>' + thDate(d.doc_date) + '</td></tr>'; }).join('') + '</table>'
+  $h('d-docs').innerHTML = docs.length ? '<table><tr><th>เลขที่</th><th>ประเภท</th><th>สาขา</th><th>วันที่</th><th>โดย</th></tr>' +
+    docs.map(function(d){ return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + esc(d.doc_no) + '</td><td>' + badge(d.doc_type, d.cancelled) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(byName(d)) + '</td></tr>'; }).join('') + '</table>'
     : '<p class="sub">ยังไม่มีเอกสาร</p>';
 }
 
@@ -628,7 +629,7 @@ async function stockCard(pid, branch){
     var p = await q(sb.from('products').select('*').eq('id', pid).single());
     await loadUnits([pid]);
     var bals = await q(sb.from('v_stock').select('branch_id,branch_name,qty,is_low').eq('product_id', pid).order('branch_id'));
-    var mv = await q(sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,is_reversal,counted_base,stock_docs(id,doc_no,doc_type,ref_no)')
+    var mv = await q(sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,is_reversal,counted_base,stock_docs(id,doc_no,doc_type,ref_no,created_by_name)')
       .eq('product_id', pid).eq('branch_id', branch).order('id', {ascending:false}).limit(100));
     openModal('<h2>' + esc(p.sku) + ' · ' + esc(p.name) + '</h2>' + (p.image_url ? '<div class="pimg"><img src="' + esc(p.image_url) + '" alt=""></div>' : '') +
       '<dl class="dl"><dt>หมวดหมู่</dt><dd>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') + '</dd>' +
@@ -636,11 +637,11 @@ async function stockCard(pid, branch){
       '<dt>ต้นทุน / ราคาขาย</dt><dd>' + money(p.cost) + ' / ' + money(p.price) + ' ต่อ' + esc(uname(p.base_unit_id)) + '</dd>' +
       '<dt>จุดสั่งซื้อ</dt><dd>' + num(p.min_qty) + ' ' + esc(uname(p.base_unit_id)) + '</dd></dl>' +
       '<h3>คงเหลือแต่ละสาขา</h3><div class="tbl-wrap"><table>' + bals.map(function(b){ return '<tr><td>' + esc(b.branch_name) + '</td><td class="num">' + qtyHtml(pid, b.qty, p.base_unit_id, b.is_low ? 'low' : '') + '</td></tr>'; }).join('') + '</table></div>' +
-      '<h3 style="margin-top:18px">ความเคลื่อนไหวล่าสุด · ' + esc(bname(branch)) + '</h3><div class="tbl-wrap"><table><tr><th>วันที่</th><th>เอกสาร</th><th class="num">จำนวน</th><th class="num">เข้า/ออก (' + esc(uname(p.base_unit_id)) + ')</th></tr>' +
+      '<h3 style="margin-top:18px">ความเคลื่อนไหวล่าสุด · ' + esc(bname(branch)) + '</h3><div class="tbl-wrap"><table><tr><th>วันที่</th><th>เอกสาร</th><th class="num">จำนวน</th><th class="num">เข้า/ออก (' + esc(uname(p.base_unit_id)) + ')</th><th>โดย</th></tr>' +
       (mv.length ? mv.map(function(m){ var d = m.stock_docs || {};
         return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + thDate(m.move_date) + '</td><td>' + badge(d.doc_type) + ' ' + esc(d.doc_no) + (m.is_reversal ? ' <span class="sub">(รายการยกเลิก)</span>' : '') + '</td>' +
-          '<td class="num">' + num(m.qty) + ' ' + esc(uname(m.unit_id)) + '</td><td class="num ' + (m.qty_base < 0 ? 'low' : 'okc') + '">' + (m.qty_base > 0 ? '+' : '') + num(m.qty_base) + '</td></tr>'; }).join('')
-        : '<tr><td colspan="4" class="empty">ยังไม่มีความเคลื่อนไหว</td></tr>') + '</table></div>', true);
+          '<td class="num">' + num(m.qty) + ' ' + esc(uname(m.unit_id)) + '</td><td class="num ' + (m.qty_base < 0 ? 'low' : 'okc') + '">' + (m.qty_base > 0 ? '+' : '') + num(m.qty_base) + '</td><td class="sub">' + esc(d.created_by_name || '-') + '</td></tr>'; }).join('')
+        : '<tr><td colspan="5" class="empty">ยังไม่มีความเคลื่อนไหว</td></tr>') + '</table></div>', true);
   });
 }
 
@@ -1240,7 +1241,7 @@ PAGES.docs = async function(){
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('d-b', {all:true}) + '</label>' +
     '<label class="f">ประเภท <select id="d-type"><option value="">ทั้งหมด</option>' + Object.keys(TYPE).map(function(k){ return '<option value="' + k + '">' + TYPE[k] + '</option>'; }).join('') + '</select></label>' +
     '<label class="f">ตั้งแต่ <input type="date" id="d-from" value="' + daysAgo(30) + '"></label><label class="f">ถึง <input type="date" id="d-to" value="' + today() + '"></label>' +
-    '<label class="f grow">เลขที่เอกสาร/อ้างอิง <input id="d-t"></label><button class="btn pri" onclick="loadDocs(0)">ค้นหา</button></div></div>' +
+    '<label class="f grow">เลขที่เอกสาร / อ้างอิง / ชื่อผู้บันทึก <input id="d-t"></label><button class="btn pri" onclick="loadDocs(0)">ค้นหา</button></div></div>' +
     '<div class="card"><div class="tbl-wrap" id="d-res"></div></div>');
   $('d-t').addEventListener('keydown', function(e){ if (e.key === 'Enter') loadDocs(0); });
   ['d-b','d-type','d-from','d-to'].forEach(function(id){ $(id).onchange = function(){ loadDocs(0); }; });
@@ -1250,16 +1251,16 @@ async function loadDocs(pg){
   var b = selNum('d-b'), t = cleanTerm($('d-t').value), ty = $('d-type').value;
   var qb = sb.from('stock_docs').select('*', {count:'exact'}).gte('doc_date', $('d-from').value || '2000-01-01').lte('doc_date', $('d-to').value || today());
   if (ty) qb = qb.eq('doc_type', ty);
-  var srch = t ? 'or(doc_no.ilike.%' + t + '%,ref_no.ilike.%' + t + '%)' : '';
+  var srch = t ? 'or(doc_no.ilike.%' + t + '%,ref_no.ilike.%' + t + '%,created_by_name.ilike.%' + t + '%)' : '';
   if (b && t) qb = qb.or('and(branch_id.eq.' + b + ',' + srch + '),and(to_branch_id.eq.' + b + ',' + srch + ')');
   else if (b) qb = qb.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
-  else if (t) qb = qb.or('doc_no.ilike.%' + t + '%,ref_no.ilike.%' + t + '%');
+  else if (t) qb = qb.or('doc_no.ilike.%' + t + '%,ref_no.ilike.%' + t + '%,created_by_name.ilike.%' + t + '%');
   var r = await qc(qb.order('id', {ascending:false}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
-  $h('d-res').innerHTML = '<table><tr><th>เลขที่</th><th>ประเภท</th><th>วันที่</th><th>สาขา</th><th>อ้างอิง</th><th>หมายเหตุ</th></tr>' +
+  $h('d-res').innerHTML = '<table><tr><th>เลขที่</th><th>ประเภท</th><th>วันที่</th><th>สาขา</th><th>บันทึกโดย</th><th>อ้างอิง</th><th>หมายเหตุ</th></tr>' +
     (r.data.length ? r.data.map(function(d){
       return '<tr class="click" onclick="showDoc(' + d.id + ')"><td><b>' + esc(d.doc_no) + '</b></td><td>' + badge(d.doc_type, d.cancelled) + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
-        '</td><td>' + esc(d.ref_no || '') + '</td><td>' + esc(d.note || '') + '</td></tr>';
-    }).join('') : '<tr><td colspan="6" class="empty">ไม่พบเอกสาร</td></tr>') + '</table>' + pager(r.count, pg, 'loadDocs');
+        '</td><td>' + esc(byName(d)) + '<div class="sub">' + thDateTime(d.created_at) + '</div></td><td>' + esc(d.ref_no || '') + '</td><td>' + esc(d.note || '') + '</td></tr>';
+    }).join('') : '<tr><td colspan="7" class="empty">ไม่พบเอกสาร</td></tr>') + '</table>' + pager(r.count, pg, 'loadDocs');
 }
 var DOC = null;
 async function showDoc(id){
@@ -1289,8 +1290,8 @@ async function showDoc(id){
     openModal('<h2>' + esc(d.doc_no) + ' ' + badge(d.doc_type, d.cancelled) + '</h2>' +
       '<dl class="dl"><dt>วันที่</dt><dd>' + thDate(d.doc_date) + '</dd><dt>สาขา</dt><dd>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</dd>' +
       (d.ref_no ? '<dt>อ้างอิง</dt><dd>' + esc(d.ref_no) + '</dd>' : '') + (d.note ? '<dt>หมายเหตุ</dt><dd>' + esc(d.note) + '</dd>' : '') +
-      '<dt>บันทึกโดย</dt><dd>' + esc(d.creator ? (d.creator.full_name || d.creator.email) : '-') + ' · ' + thDateTime(d.created_at) + '</dd>' +
-      (d.cancelled ? '<dt>ยกเลิก</dt><dd class="low">' + thDateTime(d.cancelled_at) + ' · ' + esc(d.cancel_reason || '') + '</dd>' : '') + '</dl>' +
+      '<dt>' + (d.doc_type === 'IN' ? 'ผู้รับเข้า' : d.doc_type === 'OUT' ? 'ผู้จ่ายออก' : 'บันทึกโดย') + '</dt><dd><b>' + esc(byName(d)) + '</b> · ' + thDateTime(d.created_at) + '</dd>' +
+      (d.cancelled ? '<dt>ยกเลิก</dt><dd class="low">' + esc(d.cancelled_by_name || '') + ' · ' + thDateTime(d.cancelled_at) + ' · ' + esc(d.cancel_reason || '') + '</dd>' : '') + '</dl>' +
       '<div class="tbl-wrap"><table><tr><th>#</th><th>สินค้า</th>' + head + '</tr>' + (body || '<tr><td colspan="6" class="empty">ไม่มีรายการ</td></tr>') +
       (isIn && total ? '<tr><td colspan="5" class="num"><b>รวม</b></td><td class="num"><b>' + money(total) + '</b></td></tr>' : '') + '</table></div>' +
       '<div class="row end">' + (isMgr() && !d.cancelled ? '<button class="btn danger" style="margin-right:auto" onclick="cancelDoc(' + d.id + ')">ยกเลิกเอกสาร</button>' : '') +
@@ -1316,9 +1317,10 @@ function printDoc(){
   }).join('');
   w.document.write('<html><head><meta charset="utf-8"><title>' + esc(d.doc_no) + '</title><style>body{font-family:sans-serif;padding:24px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #999;padding:6px;font-size:14px}th{background:#eee}.s{display:flex;justify-content:space-around;margin-top:60px}</style></head><body>' +
     '<div style="font-weight:700;color:#a8231f">' + SHOP_NAME + '</div><h2 style="margin-top:4px">ใบ' + TYPE[d.doc_type] + 'สินค้า' + (d.cancelled ? ' (ยกเลิก)' : '') + '</h2><p>เลขที่ ' + esc(d.doc_no) + ' &nbsp; วันที่ ' + thDate(d.doc_date) + '<br>สาขา ' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
-    (d.ref_no ? '<br>อ้างอิง ' + esc(d.ref_no) : '') + (d.note ? '<br>หมายเหตุ ' + esc(d.note) : '') + '</p>' +
+    (d.ref_no ? '<br>อ้างอิง ' + esc(d.ref_no) : '') + (d.note ? '<br>หมายเหตุ ' + esc(d.note) : '') +
+    '<br>' + (d.doc_type === 'IN' ? 'ผู้รับเข้า' : d.doc_type === 'OUT' ? 'ผู้จ่ายออก' : 'ผู้บันทึก') + ' ' + esc(byName(d)) + ' · ' + thDateTime(d.created_at) + '</p>' +
     '<table><tr><th>#</th><th>รหัส</th><th>สินค้า</th><th>จำนวน</th><th>หน่วย</th></tr>' + rows + '</table>' +
-    '<div class="s"><div>ผู้จัดทำ ...........................</div><div>ผู้ตรวจสอบ ...........................</div></div>' +
+    '<div class="s"><div style="text-align:center">' + (d.doc_type === 'IN' ? 'ผู้รับของ' : d.doc_type === 'OUT' ? 'ผู้เบิก' : 'ผู้จัดทำ') + ' ...........................<br>(' + esc(byName(d)) + ')</div><div style="text-align:center">ผู้ตรวจสอบ ...........................<br>(...........................)</div></div>' +
     '<script>window.onload=function(){window.print()}<\/script></body></html>');
   w.document.close();
 }
@@ -1640,14 +1642,14 @@ async function exportMoves(src){
   var from = $(src === 'r' ? 'r-from' : 'd-from').value, to = $(src === 'r' ? 'r-to' : 'd-to').value;
   await busy(async function(){
     var rows = await fetchAll(function(){
-      var qb = sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,unit_cost,is_reversal,products(sku,name,base_unit_id),stock_docs(doc_no,doc_type,ref_no,note)')
+      var qb = sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,unit_cost,is_reversal,products(sku,name,base_unit_id),stock_docs(doc_no,doc_type,ref_no,note,created_by_name)')
         .gte('move_date', from).lte('move_date', to).order('id');
       return b ? qb.eq('branch_id', b) : qb;
     });
     exportXlsx(rows.map(function(m){ var p = m.products || {}, d = m.stock_docs || {};
       return {'วันที่':m.move_date, 'เลขที่เอกสาร':d.doc_no, 'ประเภท':TYPE[d.doc_type] + (m.is_reversal ? ' (ยกเลิก)' : ''), 'สาขา':bname(m.branch_id),
         'รหัส':p.sku, 'ชื่อสินค้า':p.name, 'จำนวน':Number(m.qty), 'หน่วย':uname(m.unit_id), 'จำนวน (หน่วยฐาน)':Number(m.qty_base), 'หน่วยฐาน':uname(p.base_unit_id),
-        'ทุน/หน่วย':m.unit_cost != null ? Number(m.unit_cost) : '', 'อ้างอิง':d.ref_no || '', 'หมายเหตุ':d.note || ''}; }),
+        'ทุน/หน่วย':m.unit_cost != null ? Number(m.unit_cost) : '', 'อ้างอิง':d.ref_no || '', 'หมายเหตุ':d.note || '', 'บันทึกโดย':d.created_by_name || ''}; }),
       'เคลื่อนไหว', 'stock_moves_' + from + '_' + to + '.xlsx');
   });
 }
