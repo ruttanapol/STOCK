@@ -215,6 +215,7 @@ var SUPABASE_KEY = 'sb_publishable_Am3hrXB2a1MhMxe0XhR3Tw_XGeYNAlF';
 
 var APP_NAME = 'ระบบจัดเก็บสินค้า 8 เซียนซุป', SHOP_NAME = '8 เซียนซุป';
 var PAGE_SIZE = 50;
+function hideCancelled(){ return ls.get('hide_cancelled', true) !== false; }
 var TYPE = {IN:'รับเข้า', OUT:'จ่ายออก', TRANSFER:'โอนย้าย', ADJUST:'ปรับยอด', COUNT:'ตรวจนับ'};
 var ROLE = {admin:'ผู้ดูแลระบบ', manager:'ผู้จัดการสาขา', staff:'พนักงาน'};
 var sb = null, me = null;
@@ -585,6 +586,7 @@ async function loadDash(){
     : '<p class="sub">ไม่มีสินค้าที่ต่ำกว่าจุดสั่งซื้อ</p>';
 
   var rq = sb.from('stock_docs').select('*').order('id', {ascending:false}).limit(10);
+  if (hideCancelled()) rq = rq.eq('cancelled', false);
   if (b) rq = rq.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
   var docs = await q(rq);
   $h('d-docs').innerHTML = docs.length ? '<table><tr><th>เลขที่</th><th>ประเภท</th><th>สาขา</th><th>วันที่</th><th>โดย</th></tr>' +
@@ -642,8 +644,8 @@ async function stockCard(pid, branch){
     var p = await q(sb.from('products').select('*').eq('id', pid).single());
     await loadUnits([pid]);
     var bals = await q(sb.from('v_stock').select('branch_id,branch_name,qty,is_low').eq('product_id', pid).order('branch_id'));
-    var mv = await q(sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,is_reversal,counted_base,stock_docs(id,doc_no,doc_type,ref_no,created_by_name)')
-      .eq('product_id', pid).eq('branch_id', branch).order('id', {ascending:false}).limit(100));
+    var mv = await q(sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,is_reversal,counted_base,stock_docs' + (hideCancelled() ? '!inner' : '') + '(id,doc_no,doc_type,ref_no,created_by_name,cancelled)')
+      .eq('product_id', pid).eq('branch_id', branch).order('id', {ascending:false}).limit(100).eq(hideCancelled() ? 'stock_docs.cancelled' : 'product_id', hideCancelled() ? false : pid));
     openModal('<h2>' + esc(p.sku) + ' · ' + esc(p.name) + '</h2>' + (p.image_url ? '<div class="pimg"><img src="' + esc(p.image_url) + '" alt=""></div>' : '') +
       '<dl class="dl"><dt>หมวดหมู่</dt><dd>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') + '</dd>' +
       '<dt>หน่วย</dt><dd>' + PU[pid].map(function(u){ return esc(u.name) + (u.factor !== 1 ? ' = ' + num(u.factor) + ' ' + esc(uname(p.base_unit_id)) : '') + (u.barcode ? ' <span class="sub">[' + esc(u.barcode) + ']</span>' : ''); }).join(', ') + '</dd>' +
@@ -1321,16 +1323,19 @@ PAGES.docs = async function(){
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('d-b', {all:true}) + '</label>' +
     '<label class="f">ประเภท <select id="d-type"><option value="">ทั้งหมด</option>' + Object.keys(TYPE).map(function(k){ return '<option value="' + k + '">' + TYPE[k] + '</option>'; }).join('') + '</select></label>' +
     '<label class="f">ตั้งแต่ <input type="date" id="d-from" value="' + daysAgo(30) + '"></label><label class="f">ถึง <input type="date" id="d-to" value="' + today() + '"></label>' +
-    '<label class="f grow">เลขที่เอกสาร / อ้างอิง / ชื่อผู้บันทึก <input id="d-t"></label><button class="btn pri" onclick="loadDocs(0)">ค้นหา</button></div></div>' +
+    '<label class="f grow">เลขที่เอกสาร / อ้างอิง / ชื่อผู้บันทึก <input id="d-t"></label><button class="btn pri" onclick="loadDocs(0)">ค้นหา</button></div>' +
+    '<div class="row" style="margin-top:10px"><label class="chk"><input type="checkbox" id="d-hide"' + (hideCancelled() ? ' checked' : '') + '> ซ่อนเอกสารที่ยกเลิกแล้ว</label></div></div>' +
     '<div class="card"><div class="tbl-wrap" id="d-res"></div></div>');
   $('d-t').addEventListener('keydown', function(e){ if (e.key === 'Enter') loadDocs(0); });
   ['d-b','d-type','d-from','d-to'].forEach(function(id){ $(id).onchange = function(){ loadDocs(0); }; });
+  $('d-hide').onchange = function(){ ls.set('hide_cancelled', this.checked); loadDocs(0); };
   await loadDocs(0);
 };
 async function loadDocs(pg){
   var b = selNum('d-b'), t = cleanTerm($('d-t').value), ty = $('d-type').value;
   var qb = sb.from('stock_docs').select('*', {count:'exact'}).gte('doc_date', $('d-from').value || '2000-01-01').lte('doc_date', $('d-to').value || today());
   if (ty) qb = qb.eq('doc_type', ty);
+  if (hideCancelled()) qb = qb.eq('cancelled', false);
   var srch = t ? 'or(doc_no.ilike.%' + t + '%,ref_no.ilike.%' + t + '%,created_by_name.ilike.%' + t + '%)' : '';
   if (b && t) qb = qb.or('and(branch_id.eq.' + b + ',' + srch + '),and(to_branch_id.eq.' + b + ',' + srch + ')');
   else if (b) qb = qb.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
@@ -1722,8 +1727,9 @@ async function exportMoves(src){
   var from = $(src === 'r' ? 'r-from' : 'd-from').value, to = $(src === 'r' ? 'r-to' : 'd-to').value;
   await busy(async function(){
     var rows = await fetchAll(function(){
-      var qb = sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,unit_cost,is_reversal,products(sku,name,base_unit_id),stock_docs(doc_no,doc_type,ref_no,note,created_by_name)')
+      var qb = sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,unit_cost,is_reversal,products(sku,name,base_unit_id),stock_docs' + (hideCancelled() ? '!inner' : '') + '(doc_no,doc_type,ref_no,note,created_by_name,cancelled)')
         .gte('move_date', from).lte('move_date', to).order('id');
+      if (hideCancelled()) qb = qb.eq('stock_docs.cancelled', false);
       return b ? qb.eq('branch_id', b) : qb;
     });
     exportXlsx(rows.map(function(m){ var p = m.products || {}, d = m.stock_docs || {};
