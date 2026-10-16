@@ -269,6 +269,7 @@ function errMsg(e){
   if (/row-level security|permission denied/i.test(m)) return 'ไม่มีสิทธิ์ทำรายการนี้';
   if (/Failed to fetch|NetworkError/i.test(m)) return 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบอินเทอร์เน็ต';
   if (/count_sessions|count_lines|submit_count|approve_count|reject_count/i.test(m)) return 'ยังไม่ได้เปิดใช้การตรวจนับแบบรออนุมัติ กรุณารันไฟล์ update_count_review.sql ใน Supabase ก่อน';
+  if (/requisition/i.test(m) && /does not exist|not find|schema cache/i.test(m)) return 'ยังไม่ได้เปิดใช้ใบขอเบิก กรุณารันไฟล์ update_requisition.sql ใน Supabase ก่อน';
   if (/reason|admin_set_password|mark_backup|app_settings/i.test(m) && /does not exist|not find|schema cache/i.test(m)) return 'ยังไม่ได้ติดตั้งส่วนเพิ่มล่าสุด กรุณารันไฟล์ update_password_reason_backup.sql ใน Supabase ก่อน';
   if (/change_base_unit/i.test(m) && /not find|does not exist/i.test(m)) return 'ยังไม่ได้เปิดใช้การเปลี่ยนหน่วยฐาน กรุณารันไฟล์ update_change_base.sql ใน Supabase ก่อน';
   if (/Bucket not found|set_product_image|image_url/i.test(m)) return 'ยังไม่ได้เปิดใช้รูปสินค้า กรุณารันไฟล์ update_images.sql ใน Supabase ก่อน';
@@ -573,11 +574,11 @@ async function loadMaster(){
 
 // ---------- เมนู ----------
 var NAV = [
-  ['dash','แดชบอร์ด'], ['stock','สินค้าคงเหลือ'], ['txn','ทำรายการ'], ['docs','ประวัติเอกสาร'],
+  ['dash','แดชบอร์ด'], ['stock','สินค้าคงเหลือ'], ['txn','ทำรายการ'], ['req','ใบขอเบิก'], ['docs','ประวัติเอกสาร'],
   ['products','รายการสินค้า'], ['count','ตรวจนับสต๊อก'], ['report','รายงาน'], ['settings','ตั้งค่า', 'mgr']
 ];
-// พนักงานเห็นแค่ "สินค้าคงเหลือ" (สาขาตัวเอง), "จ่ายออก" และ "ตรวจนับสต๊อก"
-var STAFF_PAGES = ['stock', 'txn', 'count'];
+// พนักงานเห็นแค่ "สินค้าคงเหลือ" (สาขาตัวเอง), "จ่ายออก", "ใบขอเบิก" และ "ตรวจนับสต๊อก"
+var STAFF_PAGES = ['stock', 'txn', 'req', 'count'];
 function canPage(p){
   if (!PAGES[p]) return false;
   if (me && me.role === 'staff') return STAFF_PAGES.indexOf(p) >= 0;
@@ -588,7 +589,8 @@ function homePage(){ return me && me.role === 'staff' ? 'txn' : 'dash'; }
 function buildNav(){
   $('nav').innerHTML = NAV.filter(function(n){ return canPage(n[0]); }).map(function(n){
     var label = (me.role === 'staff' && n[0] === 'txn') ? 'จ่ายออก' : n[1];
-    return '<a data-p="' + n[0] + '" onclick="go(\'' + n[0] + '\')">' + label + '</a>'; }).join('');
+    return '<a data-p="' + n[0] + '" onclick="go(\'' + n[0] + '\')">' + label + (n[0] === 'req' ? ' <span class="b b-ADJUST hidden" id="req-n"></span>' : '') + '</a>'; }).join('');
+  refreshReqBadge();
   $('me-box').innerHTML = '<b>' + esc(me.full_name || me.email) + '</b>' + ROLE[me.role] + (isAdmin() ? ' · ทุกสาขา' : ' · ' + esc(myBranches().map(function(b){ return b.name; }).join(', '))) +
     '<br><button class="btn sm" onclick="changePassword()">เปลี่ยนรหัสผ่าน</button> <button class="btn sm" onclick="logout()">ออกจากระบบ</button>';
 }
@@ -1389,6 +1391,249 @@ async function submitTxn(){
     T.lines = []; T.ref = ''; T.note = ''; T.date = today(); T.reason = 'USE'; saveTxn(); renderTxn();
     toast('บันทึกแล้ว เลขที่ ' + doc.doc_no); showDoc(doc.id);
   });
+}
+
+// ============================================================
+//  ใบขอเบิก (สาขาขอของจากคลัง -> คลังอนุมัติ -> สร้างเอกสารโอนอัตโนมัติ)
+// ============================================================
+var RSTAT = {pending:'รออนุมัติ', approved:'อนุมัติแล้ว', rejected:'ไม่อนุมัติ', cancelled:'ยกเลิก'};
+var R = null;
+function rBadge(st){ return '<span class="b ' + ({pending:'b-ADJUST', approved:'b-IN', rejected:'b-OUT', cancelled:'b-x'})[st] + '">' + RSTAT[st] + '</span>'; }
+function myBranchIds(){ return myBranches().map(function(b){ return b.id; }); }
+async function refreshReqBadge(){
+  var el = $('req-n'); if (!el || !isMgr()) return;
+  try {
+    var r = await sb.from('requisitions').select('id', {count:'exact', head:true}).eq('status', 'pending').in('to_branch_id', myBranchIds());
+    var n = r.count || 0; el.textContent = n; el.classList.toggle('hidden', !n);
+  } catch(e){}
+}
+function saveReq(){ ls.set('req_draft', {from:R.from, to:R.to, note:R.note, lines:R.lines}); }
+PAGES.req = async function(){
+  var d = ls.get('req_draft', {}) || {};
+  R = Object.assign({tab: (R && R.tab) || null, from: null, to: null, note: '', lines: [], bal: {}}, {from:d.from, to:d.to, note:d.note || '', lines:d.lines || []});
+  if (!myBranchIds().some(function(id){ return id === R.from; })) R.from = S.cur;
+  var tos = S.branches.filter(function(b){ return b.active && b.id !== R.from; });
+  if (!tos.some(function(b){ return b.id === R.to; })) { var lt = ls.get('req_to', null), hq = tos.find(function(b){ return b.code === 'HQ'; }); R.to = (tos.find(function(b){ return b.id === lt; }) || hq || tos[0] || {}).id || null; }
+  if (!R.tab) {
+    R.tab = 'new';
+    if (isMgr()) { try { var c = await sb.from('requisitions').select('id', {count:'exact', head:true}).eq('status', 'pending').in('to_branch_id', myBranchIds()); if (c.count) R.tab = 'in'; } catch(e){} }
+  }
+  await loadUnits(R.lines.map(function(l){ return l.pid; }));
+  if (curPage !== 'req') return;
+  renderReqPage();
+};
+function setReqTab(t){ R.tab = t; renderReqPage(); }
+function reqTabs(){
+  var tabs = [['new','สร้างใบขอเบิก'], ['mine','ใบขอเบิกของสาขา']].concat(isMgr() ? [['in','รออนุมัติ (ส่งของ)']] : []);
+  return '<div class="seg">' + tabs.map(function(t){ return '<button class="' + (R.tab === t[0] ? 'on' : '') + '" onclick="setReqTab(\'' + t[0] + '\')">' + t[1] + '</button>'; }).join('') + '</div>';
+}
+function reqToOptions(){
+  return S.branches.filter(function(b){ return b.active && b.id !== R.from; }).map(function(b){ return '<option value="' + b.id + '"' + (b.id === R.to ? ' selected' : '') + '>' + esc(b.name) + '</option>'; }).join('');
+}
+function renderReqPage(){
+  if (R.tab !== 'new') return renderReqList();
+  page('<div class="ph"><h1>ใบขอเบิก</h1></div>' + reqTabs() +
+    '<div class="card"><div class="row">' +
+    '<label class="f">สาขาที่ขอ (รับของ) ' + branchSel('q-from', {value:R.from}) + '</label>' +
+    '<label class="f">ขอเบิกจาก (คลัง/สาขาที่ส่งของ) <select id="q-to">' + reqToOptions() + '</select></label>' +
+    '<label class="f grow">หมายเหตุ <input id="q-note" value="' + esc(R.note) + '" placeholder="เช่น ต้องการก่อน 10 โมง"></label></div>' +
+    '<div class="row" style="margin-top:14px"><div class="pick grow"><input id="q-scan" placeholder="สแกนบาร์โค้ด หรือพิมพ์รหัส/ชื่อสินค้าที่ต้องการขอ" autocomplete="off"></div>' +
+    '<button class="btn" onclick="openScanner(reqCode)">สแกนด้วยกล้อง</button></div></div>' +
+    '<div class="card"><div class="tbl-wrap"><table id="q-tbl"></table></div>' +
+    '<div class="row end"><span id="q-sum" class="sub" style="margin-right:auto"></span><button class="btn ghost" onclick="clearReq()">ล้างรายการ</button>' +
+    '<button class="btn pri" onclick="submitReq()">ส่งใบขอเบิก</button></div></div>');
+  $('q-from').onchange = function(){ R.from = selNum('q-from'); if (R.to === R.from) R.to = null; $('q-to').innerHTML = reqToOptions(); R.to = selNum('q-to'); saveReq(); reqBal(); };
+  $('q-to').onchange = function(){ R.to = selNum('q-to'); ls.set('req_to', R.to); saveReq(); };
+  $('q-note').onchange = function(){ R.note = this.value.trim(); saveReq(); };
+  attachPicker('q-scan', addReqLine);
+  $('q-tbl').addEventListener('input', function(e){
+    var i = e.target.dataset.i, k = e.target.dataset.k; if (i == null) return;
+    R.lines[i][k] = k === 'unit_id' ? Number(e.target.value) : e.target.value; saveReq(); reqSum();
+  });
+  renderReqLines(); reqBal();
+  $('q-scan').focus();
+}
+function renderReqLines(){
+  $h('q-tbl').innerHTML = '<tr><th>#</th><th>สินค้า</th><th>หน่วย</th><th class="num">จำนวนที่ขอ</th><th class="num">คงเหลือในสาขา</th><th></th></tr>' +
+    (R.lines.length ? R.lines.map(function(l, i){
+      return '<tr id="q-row-' + i + '"><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.sku), esc(l.name)) + '</td>' +
+        '<td><select data-i="' + i + '" data-k="unit_id">' + (PU[l.pid] || []).map(function(u){ return '<option value="' + u.unit_id + '"' + (u.unit_id == l.unit_id ? ' selected' : '') + '>' + esc(u.name) + (u.factor !== 1 ? ' (' + num(u.factor) + ')' : '') + '</option>'; }).join('') + '</select></td>' +
+        '<td class="num"><input class="qty" type="number" min="0" step="any" placeholder="0" data-i="' + i + '" data-k="qty" value="' + esc(l.qty) + '" onfocus="this.select()" onclick="this.select()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();$(\'q-scan\').focus()}"></td>' +
+        '<td class="num" id="q-bal-' + i + '"></td>' +
+        '<td><button class="x" onclick="R.lines.splice(' + i + ',1);saveReq();renderReqLines()">×</button></td></tr>';
+    }).reverse().join('') : '<tr><td colspan="6" class="empty">ยังไม่มีรายการ — สแกนหรือค้นหาสินค้าที่ต้องการขอด้านบน</td></tr>');
+  R.lines.forEach(function(_, i){ reqBalCell(i); });
+  reqSum();
+}
+function reqBalCell(i){
+  var l = R.lines[i], el = $('q-bal-' + i); if (!el || !l) return;
+  el.innerHTML = R.bal[l.pid] == null ? '<span class="sub">…</span>' : qtyHtml(l.pid, R.bal[l.pid], l.base_unit_id, R.bal[l.pid] <= 0 ? 'low' : '');
+}
+function reqSum(){ var el = $('q-sum'); if (el) el.textContent = R.lines.length ? R.lines.length + ' รายการ' : ''; }
+async function reqBal(){
+  var pids = R.lines.map(function(l){ return l.pid; }); R.bal = {};
+  if (pids.length && R.from) {
+    try { (await q(sb.from('stock_balances').select('product_id,qty').eq('branch_id', R.from).in('product_id', pids))).forEach(function(r){ R.bal[r.product_id] = Number(r.qty); }); } catch(e){}
+    pids.forEach(function(p){ if (R.bal[p] == null) R.bal[p] = 0; });
+  }
+  if (curPage === 'req' && R.tab === 'new') R.lines.forEach(function(_, i){ reqBalCell(i); });   // อัปเดตเฉพาะช่องคงเหลือ ไม่ให้ช่องที่กำลังพิมพ์หลุดโฟกัส
+}
+async function addReqLine(p, unitId){
+  await loadUnits([p.id]);
+  var uid = unitId || ((PU[p.id] || [])[0] || {}).unit_id || p.base_unit_id;   // ค่าเริ่มต้น = หน่วยใหญ่สุด (เช่น ลัง)
+  var ex = R.lines.findIndex(function(l){ return l.pid === p.id && l.unit_id == uid; });
+  if (ex >= 0) { if (unitId) R.lines[ex].qty = Number(R.lines[ex].qty || 0) + 1; }
+  else R.lines.push({pid:p.id, sku:p.sku, name:p.name, img:p.image_url || null, base_unit_id:p.base_unit_id, unit_id:uid, qty:unitId ? 1 : ''});
+  beep(true); saveReq(); renderReqLines();
+  var row = $('q-row-' + (ex >= 0 ? ex : R.lines.length - 1));
+  if (row) { row.classList.add('flash'); if (!unitId) { var qi = row.querySelector('input[data-k="qty"]'); if (qi) qi.focus(); } }
+  if (R.bal[p.id] == null) reqBal();
+}
+async function reqCode(code){
+  try { var r = await findByCode(code); if (r) addReqLine(r.p, r.unit_id); else { beep(false); toast('ไม่พบสินค้า: ' + code, 'bad'); } }
+  catch(e){ toast(errMsg(e), 'bad'); }
+}
+function clearReq(){ if (R.lines.length && !confirm('ล้างรายการทั้งหมด?')) return; R.lines = []; saveReq(); renderReqLines(); }
+async function submitReq(){
+  R.from = selNum('q-from'); R.to = selNum('q-to'); R.note = $('q-note').value.trim();
+  if (!R.to) return toast('เลือกคลัง/สาขาที่จะขอเบิก', 'bad');
+  if (!R.lines.length) return toast('ยังไม่มีรายการสินค้า', 'bad');
+  for (var i = 0; i < R.lines.length; i++) {
+    var n = Number(R.lines[i].qty);
+    if (R.lines[i].qty === '' || !isFinite(n) || n <= 0) { var rw = $('q-row-' + i); if (rw) rw.querySelector('input[data-k="qty"]').focus(); return toast('ยังไม่ได้กรอกจำนวน: ' + R.lines[i].sku + ' ' + R.lines[i].name, 'bad'); }
+  }
+  if (!confirm('ส่งใบขอเบิก ' + R.lines.length + ' รายการ\nจาก ' + bname(R.to) + ' → ' + bname(R.from))) return;
+  await busy(async function(){
+    var r = await q(sb.rpc('submit_requisition', {p_from:R.from, p_to:R.to, p_note:R.note || null,
+      p_lines: R.lines.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty)}; })}));
+    R.lines = []; R.note = ''; saveReq(); ls.set('req_to', R.to);
+    toast('ส่งใบขอเบิกแล้ว เลขที่ ' + r.req_no); R.tab = 'mine'; renderReqPage(); openReq(r.id);
+  });
+}
+// ---------- รายการใบขอเบิก ----------
+function renderReqList(){
+  var inbox = R.tab === 'in';
+  page('<div class="ph"><h1>ใบขอเบิก</h1></div>' + reqTabs() +
+    '<div class="card"><div class="row"><label class="f">' + (inbox ? 'คลัง/สาขาที่ส่งของ' : 'สาขาที่ขอ') + ' ' + branchSel('rq-br', {all:true, value: multiBranch() ? '' : S.cur}) + '</label>' +
+    '<label class="f">สถานะ <select id="rq-st"><option value="">ทั้งหมด</option>' + Object.keys(RSTAT).map(function(k){ return '<option value="' + k + '"' + (inbox && k === 'pending' ? ' selected' : '') + '>' + RSTAT[k] + '</option>'; }).join('') + '</select></label></div></div>' +
+    '<div class="card"><div class="tbl-wrap" id="rq-res"></div></div>');
+  $('rq-br').onchange = loadReqList; $('rq-st').onchange = loadReqList;
+  loadReqList();
+}
+async function loadReqList(){
+  var inbox = R.tab === 'in', b = selNum('rq-br'), st = $('rq-st').value, col = inbox ? 'to_branch_id' : 'from_branch_id';
+  var qb = sb.from('requisitions').select('*, requisition_lines(count)').order('id', {ascending:false}).limit(200);
+  qb = b ? qb.eq(col, b) : qb.in(col, myBranchIds());
+  if (st) qb = qb.eq('status', st);
+  try {
+    var rows = await q(qb);
+    $h('rq-res').innerHTML = '<table><tr><th>เลขที่</th><th>สาขาที่ขอ</th><th>ขอจาก</th><th>ส่งเมื่อ</th><th>โดย</th><th class="num">รายการ</th><th>สถานะ</th><th>หมายเหตุ</th></tr>' +
+      (rows.length ? rows.map(function(r){
+        var n = r.requisition_lines && r.requisition_lines[0] ? r.requisition_lines[0].count : 0;
+        return '<tr class="click" onclick="openReq(' + r.id + ')"><td><b>' + esc(r.req_no) + '</b></td><td>' + esc(bname(r.from_branch_id)) + '</td><td>' + esc(bname(r.to_branch_id)) + '</td><td>' + thDateTime(r.created_at) +
+          '</td><td>' + esc(r.created_by_name || '-') + '</td><td class="num">' + num(n, 0) + '</td><td>' + rBadge(r.status) + (r.reviewed_by_name ? '<div class="sub">' + esc(r.reviewed_by_name) + '</div>' : '') + '</td><td>' + esc(r.note || '') + '</td></tr>';
+      }).join('') : '<tr><td colspan="8" class="empty">' + (inbox ? 'ไม่มีใบขอเบิกที่รออนุมัติ' : 'ยังไม่มีใบขอเบิก') + '</td></tr>') + '</table>';
+  } catch(e){ $h('rq-res').innerHTML = '<p class="low">' + esc(errMsg(e)) + '</p>'; }
+}
+// ---------- รายละเอียด / อนุมัติ ----------
+var RQ = null;
+async function openReq(id){
+  await busy(async function(){
+    var r = await q(sb.from('requisitions').select('*').eq('id', id).maybeSingle());
+    if (!r) throw new Error('ไม่พบใบขอเบิก');
+    var lines = await q(sb.from('requisition_lines').select('id,product_id,unit_id,qty_req,qty_approved,products(sku,name,base_unit_id,image_url)').eq('req_id', id).order('id'));
+    await loadUnits(lines.map(function(l){ return l.product_id; }));
+    var canApprove = r.status === 'pending' && isMgr() && myBranchIds().indexOf(r.to_branch_id) >= 0;
+    var srcBal = {};
+    if (canApprove) {
+      (await q(sb.from('stock_balances').select('product_id,qty').eq('branch_id', r.to_branch_id).in('product_id', lines.map(function(l){ return l.product_id; }))))
+        .forEach(function(b){ srcBal[b.product_id] = Number(b.qty); });
+    }
+    var doc = null;
+    if (r.doc_id) { try { doc = await q(sb.from('stock_docs').select('id,doc_no,cancelled').eq('id', r.doc_id).maybeSingle()); } catch(e){} }
+    RQ = {r:r, lines:lines.map(function(l){ var p = l.products || {}; return {id:l.id, pid:l.product_id, sku:p.sku, name:p.name, img:p.image_url, base:p.base_unit_id, unit:l.unit_id,
+      f:factorOf(l.product_id, l.unit_id), req:Number(l.qty_req), app:l.qty_approved == null ? Number(l.qty_req) : Number(l.qty_approved), src:srcBal[l.product_id] || 0}; }), canApprove:canApprove, doc:doc};
+    renderReqDetail();
+  });
+}
+function renderReqDetail(){
+  var r = RQ.r, ca = RQ.canApprove, done = r.status === 'approved';
+  var canCancel = r.status === 'pending' && myBranchIds().indexOf(r.from_branch_id) >= 0 && (r.created_by === me.id || isMgr());
+  openModal('<h2>' + esc(r.req_no) + ' ' + rBadge(r.status) + '</h2>' +
+    '<dl class="dl"><dt>สาขาที่ขอ</dt><dd><b>' + esc(bname(r.from_branch_id)) + '</b></dd><dt>ขอเบิกจาก</dt><dd>' + esc(bname(r.to_branch_id)) + '</dd>' +
+    '<dt>ผู้ขอ</dt><dd>' + esc(r.created_by_name || '-') + ' · ' + thDateTime(r.created_at) + '</dd>' + (r.note ? '<dt>หมายเหตุ</dt><dd>' + esc(r.note) + '</dd>' : '') +
+    (r.reviewed_at ? '<dt>' + (r.status === 'approved' ? 'อนุมัติโดย' : r.status === 'rejected' ? 'ไม่อนุมัติโดย' : 'ยกเลิกโดย') + '</dt><dd>' + esc(r.reviewed_by_name || '-') + ' · ' + thDateTime(r.reviewed_at) + (r.review_note ? ' · ' + esc(r.review_note) : '') + '</dd>' : '') +
+    (RQ.doc ? '<dt>เอกสารโอน</dt><dd><a href="#" onclick="event.preventDefault();showDoc(' + RQ.doc.id + ')">' + esc(RQ.doc.doc_no) + '</a>' + (RQ.doc.cancelled ? ' <span class="b b-x">ถูกยกเลิก</span>' : '') + '</dd>' : '') + '</dl>' +
+    (ca ? '<p class="hint" style="margin-bottom:10px">ตรวจจำนวนที่จะส่งจริง แก้ได้ถ้าของไม่พอ (ใส่ 0 = ไม่ส่งรายการนั้น) แล้วกด "อนุมัติและโอน" ระบบจะสร้างเอกสารโอนจาก ' + esc(bname(r.to_branch_id)) + ' ไป ' + esc(bname(r.from_branch_id)) + ' ให้ทันที</p>' : '') +
+    '<div class="tbl-wrap"><table id="rd-tbl"></table></div>' +
+    (ca ? '<label class="f" style="margin-top:12px">หมายเหตุของผู้อนุมัติ <input id="rd-note"></label>' : '') +
+    '<div class="row end"><button class="btn" onclick="printReq()">พิมพ์ใบหยิบของ</button><button class="btn" onclick="copyReq()">ขอซ้ำใบนี้</button>' +
+    (canCancel ? '<button class="btn danger" onclick="cancelReq()">ยกเลิกใบขอเบิก</button>' : '') +
+    (ca ? '<button class="btn danger" onclick="rejectReq()">ไม่อนุมัติ</button><button class="btn pri" onclick="approveReq()">อนุมัติและโอน</button>' : '') + '</div>', true);
+  renderReqDetailLines();
+  if (ca) $('rd-tbl').addEventListener('input', function(e){
+    var i = e.target.dataset.i; if (i == null) return;
+    var v = e.target.value === '' ? 0 : Number(e.target.value); if (!isFinite(v) || v < 0) return;
+    RQ.lines[i].app = v; rdRow(Number(i));
+  });
+}
+function renderReqDetailLines(){
+  var ca = RQ.canApprove, done = RQ.r.status === 'approved';
+  $h('rd-tbl').innerHTML = '<tr><th>#</th><th>สินค้า</th><th class="num">ขอ</th>' + (ca ? '<th class="num">คงเหลือที่คลัง</th><th class="num">ส่งจริง</th>' : done ? '<th class="num">ส่งจริง</th>' : '') + '</tr>' +
+    RQ.lines.map(function(l, i){
+      return '<tr><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.name), esc(l.sku)) + '</td><td class="num"><b>' + num(l.req) + '</b> ' + esc(uname(l.unit)) + '</td>' +
+        (ca ? '<td class="num" id="rd-s-' + i + '"></td><td class="num"><input class="qty" type="number" min="0" step="any" data-i="' + i + '" value="' + l.app + '" onfocus="this.select()" onclick="this.select()"> ' + esc(uname(l.unit)) + '</td>'
+          : done ? '<td class="num ' + (l.app < l.req ? 'low' : 'okc') + '"><b>' + num(l.app) + '</b> ' + esc(uname(l.unit)) + '</td>' : '') + '</tr>';
+    }).join('');
+  if (ca) RQ.lines.forEach(function(_, i){ rdRow(i); });
+}
+function rdRow(i){
+  var l = RQ.lines[i], el = $('rd-s-' + i); if (!el) return;
+  var have = l.src / l.f, short = l.app > have + 1e-9;
+  el.innerHTML = '<span class="' + (short ? 'low' : '') + '">' + num(have) + ' ' + esc(uname(l.unit)) + '</span>' + (short ? '<div class="sub low">ไม่พอ</div>' : '');
+}
+async function approveReq(){
+  var send = RQ.lines.filter(function(l){ return l.app > 0; });
+  if (!send.length) return toast('ไม่มีรายการที่จะส่ง ถ้าไม่ส่งของเลยให้กด "ไม่อนุมัติ"', 'bad');
+  var short = RQ.lines.filter(function(l){ return l.app > l.src / l.f + 1e-9; });
+  if (short.length) return toast('ของที่คลังไม่พอ ' + short.length + ' รายการ กรุณาลดจำนวนส่งจริง', 'bad');
+  var less = RQ.lines.filter(function(l){ return l.app < l.req; }).length;
+  if (!confirm('อนุมัติและโอน ' + send.length + ' รายการ\nจาก ' + bname(RQ.r.to_branch_id) + ' → ' + bname(RQ.r.from_branch_id) + (less ? '\n(ส่งน้อยกว่าที่ขอ ' + less + ' รายการ)' : ''))) return;
+  await busy(async function(){
+    var r = await q(sb.rpc('approve_requisition', {p_id:RQ.r.id, p_note:($('rd-note') && $('rd-note').value.trim()) || null,
+      p_lines: RQ.lines.map(function(l){ return {line_id:l.id, qty:l.app}; })}));
+    toast('อนุมัติแล้ว โอนของเรียบร้อย'); refreshReqBadge();
+    if (curPage === 'req' && R && R.tab !== 'new') loadReqList();
+    openReq(r.id);
+  });
+}
+async function rejectReq(){
+  var why = prompt('เหตุผลที่ไม่อนุมัติ (เช่น ของหมด / สั่งซ้ำ)'); if (why === null) return;
+  await busy(async function(){ await q(sb.rpc('reject_requisition', {p_id:RQ.r.id, p_note:why || null})); closeModal(); toast('ไม่อนุมัติแล้ว'); refreshReqBadge(); if (curPage === 'req' && R.tab !== 'new') loadReqList(); });
+}
+async function cancelReq(){
+  if (!confirm('ยกเลิกใบขอเบิก ' + RQ.r.req_no + '?')) return;
+  await busy(async function(){ await q(sb.rpc('cancel_requisition', {p_id:RQ.r.id})); closeModal(); toast('ยกเลิกใบขอเบิกแล้ว'); refreshReqBadge(); if (curPage === 'req' && R.tab !== 'new') loadReqList(); });
+}
+function copyReq(){
+  var d = {from: myBranchIds().indexOf(RQ.r.from_branch_id) >= 0 ? RQ.r.from_branch_id : S.cur, to: RQ.r.to_branch_id, note: '',
+    lines: RQ.lines.map(function(l){ return {pid:l.pid, sku:l.sku, name:l.name, img:l.img, base_unit_id:l.base, unit_id:l.unit, qty:l.req}; })};
+  ls.set('req_draft', d); closeModal(); if (R) R.tab = 'new';
+  toast('คัดลอกรายการไปที่ "สร้างใบขอเบิก" แล้ว แก้จำนวนแล้วกดส่งได้เลย');
+  if (curPage === 'req') PAGES.req(); else go('req');
+}
+function printReq(){
+  var r = RQ.r, w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
+  var done = r.status === 'approved';
+  var rows = RQ.lines.map(function(l, i){ return '<tr><td style="text-align:center">' + (i + 1) + '</td><td>' + esc(l.sku) + '</td><td>' + esc(l.name) + '</td><td style="text-align:right">' + num(l.req) + '</td><td>' + esc(uname(l.unit)) +
+    '</td><td style="text-align:right">' + (done ? num(l.app) : '') + '</td><td></td></tr>'; }).join('');
+  w.document.write('<html><head><meta charset="utf-8"><title>' + esc(r.req_no) + '</title><style>body{font-family:sans-serif;padding:24px;font-size:13px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #999;padding:6px}th{background:#eee}.s{display:flex;justify-content:space-around;margin-top:50px;text-align:center}</style></head><body>' +
+    '<div style="font-weight:700;color:#a8231f">' + SHOP_NAME + '</div><h2 style="margin:4px 0">ใบขอเบิกสินค้า / ใบหยิบของ (' + RSTAT[r.status] + ')</h2>' +
+    '<p>เลขที่ ' + esc(r.req_no) + ' · ' + thDateTime(r.created_at) + '<br>สาขาที่ขอ <b>' + esc(bname(r.from_branch_id)) + '</b> · ขอเบิกจาก ' + esc(bname(r.to_branch_id)) + '<br>ผู้ขอ ' + esc(r.created_by_name || '-') + (r.note ? ' · หมายเหตุ ' + esc(r.note) : '') + '</p>' +
+    '<table><tr><th>#</th><th>รหัส</th><th>สินค้า</th><th>ขอ</th><th>หน่วย</th><th>ส่งจริง</th><th style="width:16%">หมายเหตุ</th></tr>' + rows + '</table>' +
+    '<div class="s"><div>ผู้จัดของ ...........................</div><div>ผู้ส่ง ...........................</div><div>ผู้รับของ (สาขา) ...........................</div></div>' +
+    '<script>window.onload=function(){window.print()}<\/script></body></html>');
+  w.document.close();
 }
 
 // ============================================================
