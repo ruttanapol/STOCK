@@ -256,6 +256,7 @@ function errMsg(e){
   if (/row-level security|permission denied/i.test(m)) return 'ไม่มีสิทธิ์ทำรายการนี้';
   if (/Failed to fetch|NetworkError/i.test(m)) return 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบอินเทอร์เน็ต';
   if (/count_sessions|count_lines|submit_count|approve_count|reject_count/i.test(m)) return 'ยังไม่ได้เปิดใช้การตรวจนับแบบรออนุมัติ กรุณารันไฟล์ update_count_review.sql ใน Supabase ก่อน';
+  if (/change_base_unit/i.test(m) && /not find|does not exist/i.test(m)) return 'ยังไม่ได้เปิดใช้การเปลี่ยนหน่วยฐาน กรุณารันไฟล์ update_change_base.sql ใน Supabase ก่อน';
   if (/Bucket not found|set_product_image|image_url/i.test(m)) return 'ยังไม่ได้เปิดใช้รูปสินค้า กรุณารันไฟล์ update_images.sql ใน Supabase ก่อน';
   if (/Invalid login credentials/i.test(m)) return 'อีเมลหรือรหัสผ่านไม่ถูกต้อง';
   if (/Email not confirmed/i.test(m)) return 'ยังไม่ได้ยืนยันอีเมล กรุณาตรวจสอบกล่องจดหมาย';
@@ -745,6 +746,8 @@ function bulkForm(){
     '<p class="sub">ถ้าสินค้าใดมีหน่วยนี้อยู่แล้วจะแก้ตัวคูณให้ใหม่ บาร์โค้ดเดิมยังอยู่ · ข้ามสินค้าที่หน่วยนี้เป็นหน่วยฐาน</p>';
   if (a === 'delunit') f.innerHTML = '<label class="f">ลบหน่วย ' + BK_UNITSEL('bk-unit') + '</label><p class="sub">ลบเฉพาะหน่วยรอง (หน่วยฐานลบไม่ได้) ประวัติเดิมไม่หาย บาร์โค้ดของหน่วยนั้นจะใช้ไม่ได้อีก</p>';
   if (a === 'base') f.innerHTML = '<label class="f">หน่วยฐานใหม่ ' + BK_UNITSEL('bk-unit') + '</label>' +
+    (isAdmin() ? '<label class="f" style="margin-top:10px">สำหรับสินค้าที่มีการเคลื่อนไหวแล้ว (ผู้ดูแล): 1 หน่วยเดิม = กี่หน่วยใหม่ <input id="bk-ratio" type="number" min="0" step="any" value="1"></label>' +
+      '<p class="sub">สินค้าที่มีการเคลื่อนไหวแล้ว ระบบจะแปลงยอดคงเหลือและประวัติตามอัตรานี้ (1 = แค่เปลี่ยนชื่อหน่วย) ถ้าหน่วยใหม่เป็นหน่วยรองของสินค้าอยู่แล้ว ระบบใช้ตัวคูณเดิมให้เอง</p>' : '') +
     '<p class="hint">ใช้ได้เฉพาะสินค้าที่ยังไม่เคยรับเข้า/จ่ายออก ตัวไหนมีการเคลื่อนไหวแล้วระบบจะข้ามและแจ้งชื่อให้ · ' +
     'ตัวคูณของหน่วยอื่นยังเป็นตัวเลขเดิม (เช่น ลัง = 10) ตรวจให้ถูกกับหน่วยฐานใหม่ด้วย · หน่วยฐานเดิมจะถูกลบออก และบาร์โค้ดของมันย้ายมาที่หน่วยฐานใหม่ (ถ้าหน่วยใหม่ยังไม่มีบาร์โค้ด)</p>';
   if (a === 'min') f.innerHTML = '<label class="f">จุดสั่งซื้อ (หน่วยฐาน) <input id="bk-min" type="number" min="0" step="any" placeholder="0 = ไม่แจ้งเตือน"></label>';
@@ -753,7 +756,8 @@ function bulkForm(){
 async function runBulkEdit(){
   var a = $('bk-act').value, ids = Object.keys(SEL).map(Number);
   var v = {cat: $('bk-cat') ? selNum('bk-cat') : null, unit: $('bk-unit') ? Number($('bk-unit').value) : null,
-    factor: $('bk-factor') ? Number($('bk-factor').value) : null, min: $('bk-min') ? Number($('bk-min').value || 0) : null, on: $('bk-on') ? $('bk-on').value === '1' : null};
+    factor: $('bk-factor') ? Number($('bk-factor').value) : null, ratio: $('bk-ratio') ? Number($('bk-ratio').value) : 1, min: $('bk-min') ? Number($('bk-min').value || 0) : null, on: $('bk-on') ? $('bk-on').value === '1' : null};
+  if (a === 'base' && !(v.ratio > 0)) return toast('อัตราแปลงต้องมากกว่า 0', 'bad');
   if (a === 'big' && !(v.factor > 0)) return toast('ใส่จำนวนหน่วยฐานต่อหน่วยใหญ่ให้มากกว่า 0', 'bad');
   if (a === 'min' && v.min < 0) return toast('จุดสั่งซื้อต้องไม่ติดลบ', 'bad');
   var label = $('bk-act').selectedOptions[0].textContent;
@@ -790,7 +794,12 @@ async function runBulkEdit(){
         obj.units = [{unit_id:v.unit, factor:1, barcode:had ? (had.barcode || '') : (oldBase.barcode || '')}].concat(units.filter(function(u){ return u.unit_id !== p.base_unit_id && u.unit_id !== v.unit; }));
       }
       try { await q(sb.rpc('save_product', {p: obj})); ok++; delete PU[p.id]; }
-      catch(e){ errs.push(p.sku + ' ' + p.name + ': ' + errMsg(e)); }
+      catch(e){
+        if (a === 'base' && isAdmin() && /เปลี่ยนหน่วยฐานไม่ได้/.test(errMsg(e))) {   // มีการเคลื่อนไหวแล้ว -> แปลงยอดให้
+          try { await q(sb.rpc('change_base_unit', {p_id:p.id, p_new_unit:v.unit, p_ratio:v.ratio})); ok++; delete PU[p.id]; }
+          catch(e2){ errs.push(p.sku + ' ' + p.name + ': ' + errMsg(e2)); }
+        } else errs.push(p.sku + ' ' + p.name + ': ' + errMsg(e));
+      }
     }
     $('loading').textContent = 'กำลังทำงาน...';
     openModal('<h2>ผลการแก้ไขหลายรายการ</h2><p>สำเร็จ ' + ok + ' รายการ' + (skip.length ? ', ข้าม ' + skip.length : '') + (errs.length ? ', ไม่สำเร็จ ' + errs.length : '') + '</p>' +
@@ -809,6 +818,8 @@ async function editProduct(id){
     var p = await q(sb.from('products').select('*').eq('id', id).single());
     delete PU[id]; await loadUnits([id]);
     PF = Object.assign({}, p, {units: PU[id].slice().reverse().map(function(u){ return {unit_id:u.unit_id, factor:u.factor, barcode:u.barcode || ''}; })});
+    var mc = await sb.from('stock_moves').select('id', {count:'exact', head:true}).eq('product_id', id);
+    PF.hasMoves = (mc.count || 0) > 0;
   } else {
     var bu = S.units[0].id;
     PF = {id:null, sku:'', name:'', category_id:null, base_unit_id:bu, cost:0, price:0, min_qty:0, note:'', active:true, image_url:null, units:[{unit_id:bu, factor:1, barcode:''}]};
@@ -818,7 +829,10 @@ async function editProduct(id){
     '<button class="btn danger" id="pf-imgdel" onclick="pfRemoveImage()"' + (PF.image_url ? '' : ' style="display:none"') + '>ลบรูป</button></div></div>' +
     '<div class="row"><label class="f">รหัสสินค้า * <input id="pf-sku" value="' + esc(PF.sku) + '"></label><label class="f grow">ชื่อสินค้า * <input id="pf-name" value="' + esc(PF.name) + '"></label></div>' +
     '<div class="row" style="margin-top:10px"><label class="f">หมวดหมู่ <select id="pf-cat">' + catOptions(PF.category_id, '— ไม่ระบุ —') + '</select></label>' +
-    '<label class="f">หน่วยฐาน (หน่วยเล็กสุด) <select id="pf-base" onchange="pfBase()">' + unitOptions(PF.base_unit_id) + '</select></label>' +
+    (PF.hasMoves ? '<label class="f">หน่วยฐาน (หน่วยเล็กสุด) <div class="row" style="gap:6px;flex-wrap:nowrap"><select id="pf-base" disabled>' + unitOptions(PF.base_unit_id) + '</select>' +
+        (isAdmin() ? '<button class="btn sm" onclick="openChangeBase()">เปลี่ยน</button>' : '') + '</div>' +
+        (isAdmin() ? '' : '<span class="sub" style="max-width:220px">มีการเคลื่อนไหวแล้ว เปลี่ยนได้เฉพาะผู้ดูแลระบบ</span>') + '</label>'
+      : '<label class="f">หน่วยฐาน (หน่วยเล็กสุด) <select id="pf-base" onchange="pfBase()">' + unitOptions(PF.base_unit_id) + '</select></label>') +
     '<label class="f">จุดสั่งซื้อ (หน่วยฐาน) <input id="pf-min" type="number" step="any" value="' + Number(PF.min_qty) + '"></label></div>' +
     '<div class="row" style="margin-top:10px"><label class="f">ต้นทุน/หน่วยฐาน <input id="pf-cost" type="number" step="any" value="' + Number(PF.cost) + '"></label>' +
     '<label class="f">ราคาขาย/หน่วยฐาน <input id="pf-price" type="number" step="any" value="' + Number(PF.price) + '"></label>' +
@@ -832,6 +846,58 @@ async function editProduct(id){
     var i = e.target.dataset.i, k = e.target.dataset.k; if (i == null) return;
     PF.units[i][k] = k === 'barcode' ? e.target.value : Number(e.target.value);
     if (k === 'unit_id') pfRender();
+  });
+}
+// ---------- ผู้ดูแลเปลี่ยนหน่วยฐาน (สินค้ามีการเคลื่อนไหวแล้ว) ระบบแปลงยอดทั้งหมดให้ ----------
+var CB = null;
+async function openChangeBase(){
+  if (!isAdmin() || !PF || !PF.id) return;
+  var bals = await q(sb.from('stock_balances').select('branch_id,qty').eq('product_id', PF.id));
+  CB = {pid:PF.id, sku:PF.sku, name:PF.name, old:PF.base_unit_id, units:PF.units.slice(), bals:bals};
+  openModal('<h2>เปลี่ยนหน่วยฐาน · ' + esc(PF.sku) + ' ' + esc(PF.name) + '</h2>' +
+    '<p class="hint">สินค้านี้มีการเคลื่อนไหวแล้ว ระบบจะ <b>แปลงยอดคงเหลือทุกสาขา ประวัติทั้งหมด ผลตรวจนับ จุดสั่งซื้อ และต้นทุน/ราคา</b> ให้เป็นหน่วยใหม่อัตโนมัติ ' +
+    'ทำแล้วย้อนกลับเองไม่ได้ (ต้องเปลี่ยนกลับด้วยวิธีเดียวกัน)</p>' +
+    '<div class="row" style="margin-top:12px"><label class="f">หน่วยฐานเดิม <input value="' + esc(uname(CB.old)) + '" disabled></label>' +
+    '<label class="f">หน่วยฐานใหม่ <select id="cb-unit" onchange="cbPreview()">' + S.units.filter(function(u){ return u.id !== CB.old; }).map(function(u){ return '<option value="' + u.id + '">' + esc(u.name) + '</option>'; }).join('') + '</select></label>' +
+    '<label class="f"><span>1 ' + esc(uname(CB.old)) + ' = กี่ <span id="cb-new"></span></span> <input id="cb-ratio" type="number" min="0" step="any" value="1" oninput="cbPreview()"></label></div>' +
+    '<p class="sub" id="cb-note" style="margin-top:6px"></p>' +
+    '<div class="tbl-wrap" style="margin-top:10px"><table id="cb-tbl"></table></div>' +
+    '<div class="row end"><button class="btn" onclick="editProduct(' + CB.pid + ')">ย้อนกลับ</button><button class="btn pri" onclick="runChangeBase()">ยืนยันเปลี่ยนหน่วยฐาน</button></div>');
+  cbPreview();
+}
+function cbRatio(){
+  var nu = Number($('cb-unit').value), had = CB.units.find(function(u){ return u.unit_id === nu; });
+  return had ? {x: 1 / had.factor, auto: true, f: had.factor} : {x: Number($('cb-ratio').value), auto: false};
+}
+function cbPreview(){
+  var nu = Number($('cb-unit').value), r = cbRatio(), nn = uname(nu);
+  $('cb-new').textContent = nn;
+  $('cb-ratio').disabled = r.auto;
+  if (r.auto) $('cb-ratio').value = +r.x.toFixed(6);
+  $('cb-note').innerHTML = r.auto ? '"' + esc(nn) + '" เป็นหน่วยของสินค้านี้อยู่แล้ว (1 ' + esc(nn) + ' = ' + num(r.f) + ' ' + esc(uname(CB.old)) + ') ระบบใช้อัตรานี้ให้เอง'
+    : (r.x === 1 ? 'อัตรา 1 = ใช้เมื่อตั้งชื่อหน่วยผิดแต่จำนวนเท่าเดิม เช่น แพ็ค → ถุง (หน่วยเดิมจะถูกแทนที่ บาร์โค้ดย้ายมาที่หน่วยใหม่)'
+      : 'ตัวอย่าง: เดิมนับเป็นแพ็ค ต้องการนับเป็นชิ้น และ 1 แพ็ค = 10 ชิ้น ให้ใส่ 10');
+  var ok = r.x > 0 && isFinite(r.x);
+  var exact = function(v){ return Math.abs(v * 1000 - Math.round(v * 1000)) < 1e-6; };
+  if (ok && (CB.units.some(function(u){ return u.unit_id !== nu && !exact(u.factor * r.x); }) || CB.bals.some(function(b){ return !exact(Number(b.qty) * r.x); })))
+    $('cb-note').innerHTML += '<div class="low" style="margin-top:4px">⚠ แปลงไม่ลงตัว (ทศนิยมเกิน 3 ตำแหน่ง) ระบบจะไม่ยอมเปลี่ยน — ควรเลือกหน่วยฐานที่เล็กกว่า เช่น ชิ้น/ถุง/กรัม</div>';
+  var unitsAfter = CB.units.map(function(u){ return {name:uname(u.unit_id), f: u.unit_id === nu ? 1 : u.factor * r.x, base:u.unit_id === CB.old}; })
+    .filter(function(u){ return !(r.x === 1 && u.base); });
+  if (!CB.units.some(function(u){ return u.unit_id === nu; })) unitsAfter.unshift({name:nn, f:1});
+  $('cb-tbl').innerHTML = '<tr><th>สาขา</th><th class="num">ยอดเดิม (' + esc(uname(CB.old)) + ')</th><th class="num">ยอดใหม่ (' + esc(nn) + ')</th></tr>' +
+    (CB.bals.length ? CB.bals.map(function(b){ return '<tr><td>' + esc(bname(b.branch_id)) + '</td><td class="num">' + num(b.qty) + '</td><td class="num"><b>' + (ok ? num(Number(b.qty) * r.x) : '-') + '</b></td></tr>'; }).join('')
+      : '<tr><td colspan="3" class="empty">ยังไม่มียอดคงเหลือ</td></tr>') +
+    '<tr><td colspan="3" class="sub">หน่วยหลังเปลี่ยน: ' + (ok ? unitsAfter.map(function(u){ return esc(u.name) + (u.f === 1 ? ' (ฐาน)' : ' = ' + num(u.f, 6)); }).join(', ') : '-') + '</td></tr>';
+}
+async function runChangeBase(){
+  var nu = Number($('cb-unit').value), r = cbRatio();
+  if (!(r.x > 0) || !isFinite(r.x)) return toast('ใส่จำนวนหน่วยใหม่ต่อ 1 หน่วยเดิมให้มากกว่า 0', 'bad');
+  if (!confirm('เปลี่ยนหน่วยฐานของ ' + CB.sku + ' จาก "' + uname(CB.old) + '" เป็น "' + uname(nu) + '"\n1 ' + uname(CB.old) + ' = ' + (+r.x.toFixed(6)) + ' ' + uname(nu) + '\n\nระบบจะแปลงยอดและประวัติทั้งหมดทันที')) return;
+  await busy(async function(){
+    await q(sb.rpc('change_base_unit', {p_id:CB.pid, p_new_unit:nu, p_ratio:r.x}));
+    delete PU[CB.pid]; toast('เปลี่ยนหน่วยฐานแล้ว แปลงยอดเรียบร้อย');
+    if ($('p-res')) loadProducts(PPG || 0);
+    await editProduct(CB.pid);
   });
 }
 function pfBase(){
