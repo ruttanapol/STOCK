@@ -78,7 +78,7 @@ input.qty:placeholder-shown{border-color:#f0b4ad;background:var(--bad-soft)}
 .b{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
 .b-IN{background:var(--ok-soft);color:var(--ok)} .b-OUT{background:var(--bad-soft);color:var(--bad)}
 .b-TRANSFER{background:var(--pri-soft);color:var(--pri)} .b-ADJUST{background:var(--warn-soft);color:var(--warn)}
-.b-COUNT{background:#f1eafd;color:#6b21a8} .b-x{background:#eceef1;color:var(--muted)}
+.b-waste{background:#fde2e1;color:#912018;outline:1px solid #f4b5b0} .b-COUNT{background:#f1eafd;color:#6b21a8} .b-x{background:#eceef1;color:var(--muted)}
 .b-admin{background:#14203a;color:#fff} .b-manager{background:var(--pri-soft);color:var(--pri)} .b-staff{background:#eceef1;color:#475467}
 .seg{display:inline-flex;background:#e7e9ee;border-radius:10px;padding:3px;margin-bottom:14px;flex-wrap:wrap}
 .seg button{font:inherit;border:0;background:none;padding:7px 16px;border-radius:8px;cursor:pointer;color:#475467}
@@ -172,6 +172,17 @@ input.qty:placeholder-shown{border-color:#f0b4ad;background:var(--bad-soft)}
     <label class="f">อีเมล <input id="a-email" type="email" autocomplete="username"></label>
     <label class="f">รหัสผ่าน <input id="a-pass" type="password" autocomplete="current-password"></label>
     <button class="btn pri" id="a-btn" onclick="doAuth()">เข้าสู่ระบบ</button>
+    <button class="btn ghost" id="a-forgot" style="margin-top:8px" onclick="forgotPass()">ลืมรหัสผ่าน?</button>
+  </div>
+</div>
+
+<!-- ตั้งรหัสผ่านใหม่ (เปิดจากลิงก์ในอีเมล) -->
+<div id="s-reset" class="center hidden">
+  <div class="card auth">
+    <div class="brand"><div class="logo"></div>ตั้งรหัสผ่านใหม่</div>
+    <label class="f">รหัสผ่านใหม่ (อย่างน้อย 6 ตัวอักษร) <input id="rs-p1" type="password" autocomplete="new-password"></label>
+    <label class="f">ยืนยันรหัสผ่านใหม่ <input id="rs-p2" type="password" autocomplete="new-password"></label>
+    <button class="btn pri" onclick="setNewPass()">บันทึกรหัสผ่านใหม่</button>
   </div>
 </div>
 
@@ -217,6 +228,7 @@ var APP_NAME = 'ระบบจัดเก็บสินค้า 8 เซี�
 var PAGE_SIZE = 50;
 function hideCancelled(){ return ls.get('hide_cancelled', true) !== false; }
 var TYPE = {IN:'รับเข้า', OUT:'จ่ายออก', TRANSFER:'โอนย้าย', ADJUST:'ปรับยอด', COUNT:'ตรวจนับ'};
+var REASON = {USE:'นำไปใช้', WASTE:'ของเสีย', EXPIRED:'หมดอายุ', OTHER:'อื่น ๆ'};
 var ROLE = {admin:'ผู้ดูแลระบบ', manager:'ผู้จัดการสาขา', staff:'พนักงาน'};
 var sb = null, me = null;
 var S = {branches:[], units:[], cats:[], unitMap:{}, branchMap:{}, catMap:{}, cur:null};
@@ -257,6 +269,7 @@ function errMsg(e){
   if (/row-level security|permission denied/i.test(m)) return 'ไม่มีสิทธิ์ทำรายการนี้';
   if (/Failed to fetch|NetworkError/i.test(m)) return 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจสอบอินเทอร์เน็ต';
   if (/count_sessions|count_lines|submit_count|approve_count|reject_count/i.test(m)) return 'ยังไม่ได้เปิดใช้การตรวจนับแบบรออนุมัติ กรุณารันไฟล์ update_count_review.sql ใน Supabase ก่อน';
+  if (/reason|admin_set_password|mark_backup|app_settings/i.test(m) && /does not exist|not find|schema cache/i.test(m)) return 'ยังไม่ได้ติดตั้งส่วนเพิ่มล่าสุด กรุณารันไฟล์ update_password_reason_backup.sql ใน Supabase ก่อน';
   if (/change_base_unit/i.test(m) && /not find|does not exist/i.test(m)) return 'ยังไม่ได้เปิดใช้การเปลี่ยนหน่วยฐาน กรุณารันไฟล์ update_change_base.sql ใน Supabase ก่อน';
   if (/Bucket not found|set_product_image|image_url/i.test(m)) return 'ยังไม่ได้เปิดใช้รูปสินค้า กรุณารันไฟล์ update_images.sql ใน Supabase ก่อน';
   if (/Invalid login credentials/i.test(m)) return 'อีเมลหรือรหัสผ่านไม่ถูกต้อง';
@@ -448,14 +461,17 @@ function normUrl(u){
   m = u.match(/^(https?:\/\/[^\/?#\s]+)/i);
   return m ? m[1] : u;
 }
-function show(id){ ['s-setup','s-login','s-pending','s-app'].forEach(function(s){ $(s).classList.toggle('hidden', s !== id); }); }
+function show(id){ ['s-setup','s-login','s-reset','s-pending','s-app'].forEach(function(s){ $(s).classList.toggle('hidden', s !== id); }); }
 async function init(){
   var cfg = ls.get('stock_cfg', null) || {};
   var url = normUrl(SUPABASE_URL || cfg.url), key = String(SUPABASE_KEY || cfg.key || '').trim();
   if (!url || !key) return show('s-setup');
   if (!window.supabase) { show('s-login'); return toast('โหลดไลบรารี Supabase ไม่สำเร็จ', 'bad'); }
+  var recovery = /type=recovery/.test(location.hash) || /type=recovery/.test(location.search);
   sb = supabase.createClient(url, key);
+  if (sb.auth.onAuthStateChange) sb.auth.onAuthStateChange(function(ev){ if (ev === 'PASSWORD_RECOVERY') { RECOVERY = true; show('s-reset'); } });
   var r = await sb.auth.getSession();
+  if (recovery || RECOVERY) { RECOVERY = true; return show('s-reset'); }
   if (r.data && r.data.session) await afterLogin(); else show('s-login');
 }
 function saveCfg(){
@@ -463,7 +479,47 @@ function saveCfg(){
   if (!/^https:\/\//.test(url) || !key) return toast('กรอก URL และ key ให้ครบ', 'bad');
   ls.set('stock_cfg', {url: url, key: key}); location.reload();
 }
-var authMode = 0;
+var authMode = 0, RECOVERY = false;
+function forgotPass(){
+  openModal('<h2>ลืมรหัสผ่าน</h2>' +
+    '<p><b>วิธีที่เร็วที่สุด:</b> แจ้งผู้ดูแลระบบให้ตั้งรหัสผ่านใหม่ให้ (เมนู ตั้งค่า > ผู้ใช้งาน > ตั้งรหัสผ่าน)</p>' +
+    '<p class="sub">หรือลองให้ระบบส่งลิงก์ตั้งรหัสผ่านใหม่ไปทางอีเมล (ใช้ได้เมื่อผู้ดูแลตั้งค่าระบบส่งอีเมลไว้แล้ว)</p>' +
+    '<label class="f">อีเมลที่ใช้สมัคร <input id="fp-email" type="email" value="' + esc($('a-email').value.trim()) + '"></label>' +
+    '<div class="row end"><button class="btn" onclick="closeModal()">ปิด</button><button class="btn pri" onclick="sendReset()">ส่งลิงก์ทางอีเมล</button></div>');
+}
+async function sendReset(){
+  var email = $('fp-email').value.trim(); if (!email) return toast('กรอกอีเมล', 'bad');
+  $('loading').classList.remove('hidden');
+  try {
+    var r = await sb.auth.resetPasswordForEmail(email, {redirectTo: location.origin + location.pathname});
+    if (r.error) throw r.error;
+    closeModal(); toast('ส่งลิงก์แล้ว กรุณาตรวจกล่องจดหมาย (รวมถึงอีเมลขยะ)');
+  } catch(e){
+    toast('ส่งอีเมลไม่สำเร็จ กรุณาให้ผู้ดูแลระบบตั้งรหัสผ่านใหม่ให้', 'bad'); console.warn(e);
+  } finally { $('loading').classList.add('hidden'); }
+}
+async function setNewPass(){
+  var a = $('rs-p1').value, b = $('rs-p2').value;
+  if (a.length < 6) return toast('รหัสผ่านอย่างน้อย 6 ตัวอักษร', 'bad');
+  if (a !== b) return toast('รหัสผ่านทั้งสองช่องไม่ตรงกัน', 'bad');
+  await busy(async function(){
+    await q(sb.auth.updateUser({password: a}));
+    RECOVERY = false; history.replaceState(null, '', location.pathname);
+    toast('ตั้งรหัสผ่านใหม่แล้ว'); await afterLogin();
+  });
+}
+function changePassword(){
+  openModal('<h2>เปลี่ยนรหัสผ่าน</h2>' +
+    '<label class="f">รหัสผ่านใหม่ (อย่างน้อย 6 ตัวอักษร) <input id="cp-1" type="password" autocomplete="new-password"></label>' +
+    '<label class="f" style="margin-top:10px">ยืนยันรหัสผ่านใหม่ <input id="cp-2" type="password" autocomplete="new-password"></label>' +
+    '<div class="row end"><button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn pri" onclick="saveMyPassword()">บันทึก</button></div>');
+}
+async function saveMyPassword(){
+  var a = $('cp-1').value, b = $('cp-2').value;
+  if (a.length < 6) return toast('รหัสผ่านอย่างน้อย 6 ตัวอักษร', 'bad');
+  if (a !== b) return toast('รหัสผ่านทั้งสองช่องไม่ตรงกัน', 'bad');
+  await busy(async function(){ await q(sb.auth.updateUser({password: a})); closeModal(); toast('เปลี่ยนรหัสผ่านแล้ว'); });
+}
 function authTab(m){
   authMode = m; $('tab-in').classList.toggle('on', m === 0); $('tab-up').classList.toggle('on', m === 1);
   $('f-name').classList.toggle('hidden', m === 0); $('a-btn').textContent = m ? 'สมัครใช้งาน' : 'เข้าสู่ระบบ';
@@ -534,7 +590,7 @@ function buildNav(){
     var label = (me.role === 'staff' && n[0] === 'txn') ? 'จ่ายออก' : n[1];
     return '<a data-p="' + n[0] + '" onclick="go(\'' + n[0] + '\')">' + label + '</a>'; }).join('');
   $('me-box').innerHTML = '<b>' + esc(me.full_name || me.email) + '</b>' + ROLE[me.role] + (isAdmin() ? ' · ทุกสาขา' : ' · ' + esc(myBranches().map(function(b){ return b.name; }).join(', '))) +
-    '<br><button class="btn sm" onclick="logout()">ออกจากระบบ</button>';
+    '<br><button class="btn sm" onclick="changePassword()">เปลี่ยนรหัสผ่าน</button> <button class="btn sm" onclick="logout()">ออกจากระบบ</button>';
 }
 function toggleSide(open){ $('side').classList.toggle('open', open); $('side-dim').classList.toggle('on', open); }
 function page(html){ $('page').innerHTML = html; }
@@ -553,17 +609,30 @@ function pager(total, pg, fn){
     '<button class="btn sm" ' + (pg >= pages - 1 ? 'disabled' : '') + ' onclick="' + fn + '(' + (pg + 1) + ')">ถัดไป ›</button></div>';
 }
 function byName(d){ return d.created_by_name || (d.creator ? (d.creator.full_name || d.creator.email) : '') || '-'; }
-function badge(t, cancelled){ return '<span class="b ' + (cancelled ? 'b-x' : 'b-' + t) + '">' + TYPE[t] + (cancelled ? ' (ยกเลิก)' : '') + '</span>'; }
+function badge(t, cancelled, reason){
+  var r = (t === 'OUT' && reason && reason !== 'USE') ? ' · ' + REASON[reason] : '';
+  return '<span class="b ' + (cancelled ? 'b-x' : (r ? 'b-OUT b-waste' : 'b-' + t)) + '">' + TYPE[t] + r + (cancelled ? ' (ยกเลิก)' : '') + '</span>';
+}
+function typeLabel(d){ return TYPE[d.doc_type] + (d.doc_type === 'OUT' && d.reason && d.reason !== 'USE' ? ' (' + REASON[d.reason] + ')' : ''); }
 
 // ============================================================
 //  แดชบอร์ด
 // ============================================================
 PAGES.dash = async function(){
-  page('<div class="ph"><h1>แดชบอร์ด</h1>' + branchSel('d-br', {all: true}) + '</div>' +
+  page('<div class="ph"><h1>แดชบอร์ด</h1>' + branchSel('d-br', {all: true}) + '</div><div id="bk-slot"></div>' +
     '<div class="stats" id="d-stats"></div>' +
     '<div class="cols2"><div class="card"><h3>สินค้าใกล้หมด / ต่ำกว่าจุดสั่งซื้อ</h3><div class="tbl-wrap" id="d-low"></div></div>' +
     '<div class="card"><h3>เอกสารล่าสุด</h3><div class="tbl-wrap" id="d-docs"></div></div></div>');
-  $('d-br').onchange = loadDash; await loadDash();
+  $('d-br').onchange = loadDash;
+  if (isAdmin()) lastBackup().then(function(b){
+    if (b === undefined || !$('bk-slot')) return;
+    var days = b ? Math.floor((Date.now() - b.at) / 86400000) : null;
+    if (b && days < 7) return;
+    $('bk-slot').innerHTML = '<div class="hint" id="bk-banner" style="margin:0 0 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span>' +
+      (b ? 'ไม่ได้สำรองข้อมูลมา ' + days + ' วันแล้ว' : 'ยังไม่เคยสำรองข้อมูล') + ' (แพ็กเกจฟรีของ Supabase ไม่มีระบบสำรองให้)</span>' +
+      '<button class="btn sm pri" onclick="backupAll()">สำรองข้อมูลตอนนี้</button></div>';
+  });
+  await loadDash();
 };
 async function loadDash(){
   var b = selNum('d-br');
@@ -590,7 +659,7 @@ async function loadDash(){
   if (b) rq = rq.or('branch_id.eq.' + b + ',to_branch_id.eq.' + b);
   var docs = await q(rq);
   $h('d-docs').innerHTML = docs.length ? '<table><tr><th>เลขที่</th><th>ประเภท</th><th>สาขา</th><th>วันที่</th><th>โดย</th></tr>' +
-    docs.map(function(d){ return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + esc(d.doc_no) + '</td><td>' + badge(d.doc_type, d.cancelled) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(byName(d)) + '</td></tr>'; }).join('') + '</table>'
+    docs.map(function(d){ return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + esc(d.doc_no) + '</td><td>' + badge(d.doc_type, d.cancelled, d.reason) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(byName(d)) + '</td></tr>'; }).join('') + '</table>'
     : '<p class="sub">ยังไม่มีเอกสาร</p>';
 }
 
@@ -644,7 +713,7 @@ async function stockCard(pid, branch){
     var p = await q(sb.from('products').select('*').eq('id', pid).single());
     await loadUnits([pid]);
     var bals = await q(sb.from('v_stock').select('branch_id,branch_name,qty,is_low').eq('product_id', pid).order('branch_id'));
-    var mv = await q(sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,is_reversal,counted_base,stock_docs' + (hideCancelled() ? '!inner' : '') + '(id,doc_no,doc_type,ref_no,created_by_name,cancelled)')
+    var mv = await q(sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,is_reversal,counted_base,stock_docs' + (hideCancelled() ? '!inner' : '') + '(id,doc_no,doc_type,ref_no,created_by_name,cancelled,reason)')
       .eq('product_id', pid).eq('branch_id', branch).order('id', {ascending:false}).limit(100).eq(hideCancelled() ? 'stock_docs.cancelled' : 'product_id', hideCancelled() ? false : pid));
     openModal('<h2>' + esc(p.sku) + ' · ' + esc(p.name) + '</h2>' + (p.image_url ? '<div class="pimg"><img src="' + esc(p.image_url) + '" alt=""></div>' : '') +
       '<dl class="dl"><dt>หมวดหมู่</dt><dd>' + esc(p.category_id ? S.catMap[p.category_id].name : '-') + '</dd>' +
@@ -654,7 +723,7 @@ async function stockCard(pid, branch){
       '<h3>คงเหลือแต่ละสาขา</h3><div class="tbl-wrap"><table>' + bals.map(function(b){ return '<tr><td>' + esc(b.branch_name) + '</td><td class="num">' + qtyHtml(pid, b.qty, p.base_unit_id, b.is_low ? 'low' : '') + '</td></tr>'; }).join('') + '</table></div>' +
       '<h3 style="margin-top:18px">ความเคลื่อนไหวล่าสุด · ' + esc(bname(branch)) + '</h3><div class="tbl-wrap"><table><tr><th>วันที่</th><th>เอกสาร</th><th class="num">จำนวน</th><th class="num">เข้า/ออก (' + esc(uname(p.base_unit_id)) + ')</th><th>โดย</th></tr>' +
       (mv.length ? mv.map(function(m){ var d = m.stock_docs || {};
-        return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + thDate(m.move_date) + '</td><td>' + badge(d.doc_type) + ' ' + esc(d.doc_no) + (m.is_reversal ? ' <span class="sub">(รายการยกเลิก)</span>' : '') + '</td>' +
+        return '<tr class="click" onclick="showDoc(' + d.id + ')"><td>' + thDate(m.move_date) + '</td><td>' + badge(d.doc_type, false, d.reason) + ' ' + esc(d.doc_no) + (m.is_reversal ? ' <span class="sub">(รายการยกเลิก)</span>' : '') + '</td>' +
           '<td class="num">' + num(m.qty) + ' ' + esc(uname(m.unit_id)) + '</td><td class="num ' + (m.qty_base < 0 ? 'low' : 'okc') + '">' + (m.qty_base > 0 ? '+' : '') + num(m.qty_base) + '</td><td class="sub">' + esc(d.created_by_name || '-') + '</td></tr>'; }).join('')
         : '<tr><td colspan="5" class="empty">ยังไม่มีความเคลื่อนไหว</td></tr>') + '</table></div>', true);
   });
@@ -1190,7 +1259,7 @@ async function importProducts(file){
 //  ทำรายการ (รับเข้า / จ่ายออก / โอน / ปรับยอด)
 // ============================================================
 var T = null;
-function saveTxn(){ ls.set('txn_draft', {type:T.type, branch:T.branch, to:T.to, ref:T.ref, note:T.note, lines:T.lines}); }
+function saveTxn(){ ls.set('txn_draft', {type:T.type, branch:T.branch, to:T.to, ref:T.ref, note:T.note, lines:T.lines, reason:T.reason}); }
 PAGES.txn = async function(){
   if (!T) T = Object.assign({type:'IN', branch:null, to:null, ref:'', note:'', lines:[]}, ls.get('txn_draft', {}));
   T.date = T.date || today(); T.bal = {};
@@ -1200,6 +1269,11 @@ PAGES.txn = async function(){
   if (curPage !== 'txn') return;
   renderTxn();
 };
+function setReason(k){
+  T.reason = k; saveTxn();
+  document.querySelectorAll('#t-reason button').forEach(function(b, i){ b.classList.toggle('on', Object.keys(REASON)[i] === k); });
+  var btn = document.querySelector('#page .row.end .btn.pri'); if (btn) btn.textContent = 'บันทึก' + TYPE[T.type] + (k !== 'USE' ? ' (' + REASON[k] + ')' : '');
+}
 function setTxnType(t){ if (!isMgr()) t = 'OUT'; readTxnHead(); T.type = t; saveTxn(); renderTxn(); }
 function readTxnHead(){
   if (!$('t-br')) return;
@@ -1220,12 +1294,14 @@ function renderTxn(){
     '<label class="f">วันที่ <input type="date" id="t-date" value="' + T.date + '" max="' + today() + '"></label>' +
     '<label class="f">เลขที่อ้างอิง <input id="t-ref" value="' + esc(T.ref) + '" placeholder="' + (T.type === 'IN' ? 'เลขที่ใบส่งของ/ใบสั่งซื้อ' : 'ถ้ามี') + '"></label>' +
     '<label class="f grow">หมายเหตุ <input id="t-note" value="' + esc(T.note) + '"></label></div>' +
+    (T.type === 'OUT' ? '<div class="row" style="margin-top:12px;align-items:center"><span class="sub">เหตุผล</span><div class="seg" style="margin:0" id="t-reason">' +
+      Object.keys(REASON).map(function(k){ return '<button class="' + ((T.reason || 'USE') === k ? 'on' : '') + '" onclick="setReason(\'' + k + '\')">' + REASON[k] + '</button>'; }).join('') + '</div></div>' : '') +
     (T.type === 'ADJUST' ? '<p class="hint">ใส่จำนวนบวกเพื่อเพิ่มยอด และจำนวนลบ (เช่น -2) เพื่อลดยอด เช่น สินค้าเสียหาย สูญหาย</p>' : '') +
     '<div class="row" style="margin-top:14px"><div class="pick grow"><input id="t-scan" placeholder="สแกนบาร์โค้ด หรือพิมพ์รหัส/ชื่อสินค้า แล้วกด Enter" autocomplete="off"></div>' +
     '<button class="btn" onclick="openScanner(txnCode)">สแกนด้วยกล้อง</button></div></div>' +
     '<div class="card"><div class="tbl-wrap"><table id="t-tbl"></table></div>' +
     '<div class="row end"><span id="t-sum" class="sub" style="margin-right:auto"></span><button class="btn ghost" onclick="clearTxn()">ล้างรายการ</button>' +
-    '<button class="btn pri" onclick="submitTxn()">บันทึก' + TYPE[T.type] + '</button></div></div>');
+    '<button class="btn pri" onclick="submitTxn()">บันทึก' + TYPE[T.type] + (T.type === 'OUT' && T.reason && T.reason !== 'USE' ? ' (' + REASON[T.reason] + ')' : '') + '</button></div></div>');
   $('t-br').onchange = function(){ readTxnHead(); if (T.to === T.branch) T.to = null; saveTxn(); if ($('t-to')) $('t-to').innerHTML = toOptions(); refreshTxnBal(); };
   ['t-to','t-date','t-ref','t-note'].forEach(function(id){ if ($(id)) $(id).onchange = function(){ readTxnHead(); saveTxn(); }; });
   attachPicker('t-scan', addTxnLine);
@@ -1305,12 +1381,12 @@ async function submitTxn(){
     if (!isFinite(n) || n === 0 || (T.type !== 'ADJUST' && n < 0)) return toast('จำนวนของ ' + T.lines[i].sku + ' ไม่ถูกต้อง', 'bad');
   }
   if (T.type === 'TRANSFER' && !T.to) return toast('เลือกสาขาปลายทาง', 'bad');
-  if (!confirm('ยืนยันบันทึก' + TYPE[T.type] + ' ' + T.lines.length + ' รายการ\nสาขา: ' + bname(T.branch) + (T.type === 'TRANSFER' ? ' → ' + bname(T.to) : '') + '\nวันที่: ' + thDate(T.date))) return;
+  if (!confirm('ยืนยันบันทึก' + TYPE[T.type] + (T.type === 'OUT' ? ' (' + REASON[T.reason || 'USE'] + ')' : '') + ' ' + T.lines.length + ' รายการ\nสาขา: ' + bname(T.branch) + (T.type === 'TRANSFER' ? ' → ' + bname(T.to) : '') + '\nวันที่: ' + thDate(T.date))) return;
   var lines = T.lines.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty), unit_cost:(T.type !== 'IN' || l.cost === '' || l.cost == null) ? null : Number(l.cost)}; });
   await busy(async function(){
     var doc = await q(sb.rpc('post_stock_doc', {p_type:T.type, p_branch:T.branch, p_to_branch:T.type === 'TRANSFER' ? T.to : null,
-      p_doc_date:T.date, p_ref:T.ref || null, p_note:T.note || null, p_lines:lines}));
-    T.lines = []; T.ref = ''; T.note = ''; T.date = today(); saveTxn(); renderTxn();
+      p_doc_date:T.date, p_ref:T.ref || null, p_note:T.note || null, p_lines:lines, p_reason:T.type === 'OUT' ? (T.reason || 'USE') : null}));
+    T.lines = []; T.ref = ''; T.note = ''; T.date = today(); T.reason = 'USE'; saveTxn(); renderTxn();
     toast('บันทึกแล้ว เลขที่ ' + doc.doc_no); showDoc(doc.id);
   });
 }
@@ -1321,7 +1397,8 @@ async function submitTxn(){
 PAGES.docs = async function(){
   page('<div class="ph"><h1>ประวัติเอกสาร</h1><button class="btn" onclick="exportMoves(\'d\')">ส่งออกรายการเคลื่อนไหว</button></div>' +
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('d-b', {all:true}) + '</label>' +
-    '<label class="f">ประเภท <select id="d-type"><option value="">ทั้งหมด</option>' + Object.keys(TYPE).map(function(k){ return '<option value="' + k + '">' + TYPE[k] + '</option>'; }).join('') + '</select></label>' +
+    '<label class="f">ประเภท <select id="d-type"><option value="">ทั้งหมด</option>' + Object.keys(TYPE).map(function(k){ return '<option value="' + k + '">' + TYPE[k] + '</option>'; }).join('') +
+      Object.keys(REASON).map(function(k){ return '<option value="OUT:' + k + '">จ่ายออก · ' + REASON[k] + '</option>'; }).join('') + '</select></label>' +
     '<label class="f">ตั้งแต่ <input type="date" id="d-from" value="' + daysAgo(30) + '"></label><label class="f">ถึง <input type="date" id="d-to" value="' + today() + '"></label>' +
     '<label class="f grow">เลขที่เอกสาร / อ้างอิง / ชื่อผู้บันทึก <input id="d-t"></label><button class="btn pri" onclick="loadDocs(0)">ค้นหา</button></div>' +
     '<div class="row" style="margin-top:10px"><label class="chk"><input type="checkbox" id="d-hide"' + (hideCancelled() ? ' checked' : '') + '> ซ่อนเอกสารที่ยกเลิกแล้ว</label></div></div>' +
@@ -1334,7 +1411,7 @@ PAGES.docs = async function(){
 async function loadDocs(pg){
   var b = selNum('d-b'), t = cleanTerm($('d-t').value), ty = $('d-type').value;
   var qb = sb.from('stock_docs').select('*', {count:'exact'}).gte('doc_date', $('d-from').value || '2000-01-01').lte('doc_date', $('d-to').value || today());
-  if (ty) qb = qb.eq('doc_type', ty);
+  if (ty) { var tp = ty.split(':'); qb = qb.eq('doc_type', tp[0]); if (tp[1]) qb = qb.eq('reason', tp[1]); }
   if (hideCancelled()) qb = qb.eq('cancelled', false);
   var srch = t ? 'or(doc_no.ilike.%' + t + '%,ref_no.ilike.%' + t + '%,created_by_name.ilike.%' + t + '%)' : '';
   if (b && t) qb = qb.or('and(branch_id.eq.' + b + ',' + srch + '),and(to_branch_id.eq.' + b + ',' + srch + ')');
@@ -1343,7 +1420,7 @@ async function loadDocs(pg){
   var r = await qc(qb.order('id', {ascending:false}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
   $h('d-res').innerHTML = '<table><tr><th>เลขที่</th><th>ประเภท</th><th>วันที่</th><th>สาขา</th><th>บันทึกโดย</th><th>อ้างอิง</th><th>หมายเหตุ</th></tr>' +
     (r.data.length ? r.data.map(function(d){
-      return '<tr class="click" onclick="showDoc(' + d.id + ')"><td><b>' + esc(d.doc_no) + '</b></td><td>' + badge(d.doc_type, d.cancelled) + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
+      return '<tr class="click" onclick="showDoc(' + d.id + ')"><td><b>' + esc(d.doc_no) + '</b></td><td>' + badge(d.doc_type, d.cancelled, d.reason) + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
         '</td><td>' + esc(byName(d)) + '<div class="sub">' + thDateTime(d.created_at) + '</div></td><td>' + esc(d.ref_no || '') + '</td><td>' + esc(d.note || '') + '</td></tr>';
     }).join('') : '<tr><td colspan="7" class="empty">ไม่พบเอกสาร</td></tr>') + '</table>' + pager(r.count, pg, 'loadDocs');
 }
@@ -1372,9 +1449,10 @@ async function showDoc(id){
       }
       return '<tr><td>' + (i + 1) + '</td><td><b>' + esc(p.sku) + '</b> ' + esc(p.name) + '</td>' + tail + '</tr>';
     }).join('');
-    openModal('<h2>' + esc(d.doc_no) + ' ' + badge(d.doc_type, d.cancelled) + '</h2>' +
+    openModal('<h2>' + esc(d.doc_no) + ' ' + badge(d.doc_type, d.cancelled, d.reason) + '</h2>' +
       '<dl class="dl"><dt>วันที่</dt><dd>' + thDate(d.doc_date) + '</dd><dt>สาขา</dt><dd>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</dd>' +
       (d.ref_no ? '<dt>อ้างอิง</dt><dd>' + esc(d.ref_no) + '</dd>' : '') + (d.note ? '<dt>หมายเหตุ</dt><dd>' + esc(d.note) + '</dd>' : '') +
+      (d.doc_type === 'OUT' ? '<dt>เหตุผล</dt><dd>' + REASON[d.reason || 'USE'] + '</dd>' : '') +
       '<dt>' + (d.doc_type === 'IN' ? 'ผู้รับเข้า' : d.doc_type === 'OUT' ? 'ผู้จ่ายออก' : 'บันทึกโดย') + '</dt><dd><b>' + esc(byName(d)) + '</b> · ' + thDateTime(d.created_at) + '</dd>' +
       (d.cancelled ? '<dt>ยกเลิก</dt><dd class="low">' + esc(d.cancelled_by_name || '') + ' · ' + thDateTime(d.cancelled_at) + ' · ' + esc(d.cancel_reason || '') + '</dd>' : '') + '</dl>' +
       '<div class="tbl-wrap"><table><tr><th>#</th><th>สินค้า</th>' + head + '</tr>' + (body || '<tr><td colspan="6" class="empty">ไม่มีรายการ</td></tr>') +
@@ -1401,7 +1479,7 @@ function printDoc(){
     return '<tr><td>' + (i + 1) + '</td><td>' + esc(p.sku) + '</td><td>' + esc(p.name) + '</td><td style="text-align:right">' + q1 + '</td><td>' + esc(uname(m.unit_id)) + '</td></tr>';
   }).join('');
   w.document.write('<html><head><meta charset="utf-8"><title>' + esc(d.doc_no) + '</title><style>body{font-family:sans-serif;padding:24px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #999;padding:6px;font-size:14px}th{background:#eee}.s{display:flex;justify-content:space-around;margin-top:60px}</style></head><body>' +
-    '<div style="font-weight:700;color:#a8231f">' + SHOP_NAME + '</div><h2 style="margin-top:4px">ใบ' + TYPE[d.doc_type] + 'สินค้า' + (d.cancelled ? ' (ยกเลิก)' : '') + '</h2><p>เลขที่ ' + esc(d.doc_no) + ' &nbsp; วันที่ ' + thDate(d.doc_date) + '<br>สาขา ' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
+    '<div style="font-weight:700;color:#a8231f">' + SHOP_NAME + '</div><h2 style="margin-top:4px">ใบ' + TYPE[d.doc_type] + 'สินค้า' + (d.doc_type === 'OUT' && d.reason && d.reason !== 'USE' ? ' (' + REASON[d.reason] + ')' : '') + (d.cancelled ? ' (ยกเลิก)' : '') + '</h2><p>เลขที่ ' + esc(d.doc_no) + ' &nbsp; วันที่ ' + thDate(d.doc_date) + '<br>สาขา ' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
     (d.ref_no ? '<br>อ้างอิง ' + esc(d.ref_no) : '') + (d.note ? '<br>หมายเหตุ ' + esc(d.note) : '') +
     '<br>' + (d.doc_type === 'IN' ? 'ผู้รับเข้า' : d.doc_type === 'OUT' ? 'ผู้จ่ายออก' : 'ผู้บันทึก') + ' ' + esc(byName(d)) + ' · ' + thDateTime(d.created_at) + '</p>' +
     '<table><tr><th>#</th><th>รหัส</th><th>สินค้า</th><th>จำนวน</th><th>หน่วย</th></tr>' + rows + '</table>' +
@@ -1575,7 +1653,8 @@ function stBadge(st){ return '<span class="b ' + (st === 'approved' ? 'b-IN' : s
 var CR = null;
 async function openCountReview(id){
   await busy(async function(){
-    var s = await q(sb.from('count_sessions').select('*').eq('id', id).single());
+    var s = await q(sb.from('count_sessions').select('*').eq('id', id).maybeSingle());
+    if (!s) throw new Error('ไม่พบรายการตรวจนับนี้');
     var lines = await fetchAll(function(){ return sb.from('count_lines').select('product_id,system_base,counted_base,products(sku,name,base_unit_id,cost,image_url)').eq('session_id', id).order('id'); });
     var pids = lines.map(function(l){ return l.product_id; }), now = {};
     await loadUnits(pids);
@@ -1693,14 +1772,48 @@ PAGES.report = async function(){
     '<label class="f">ตั้งแต่ <input type="date" id="r-from" value="' + monthStart() + '"></label><label class="f">ถึง <input type="date" id="r-to" value="' + today() + '"></label>' +
     '<button class="btn pri" onclick="runReport()">แสดงรายงาน</button><button class="btn" onclick="exportReport()">ส่งออก Excel</button><button class="btn" onclick="exportMoves(\'r\')">ส่งออกรายการเคลื่อนไหว</button></div>' +
     '<p class="sub">ยอดยกมา + รับเข้า − จ่ายออก = คงเหลือ (หน่วยฐาน) · รวมการโอน ปรับยอด ตรวจนับ และรายการยกเลิก' + (multiBranch() ? ' · "ทุกสาขา" = รวมทุกสาขาที่มีสิทธิ์ และไม่นับการโอนระหว่างสาขาในกลุ่มเป็นเข้า/ออก' : '') + '</p></div>' +
-    '<div class="card"><div class="tbl-wrap" id="r-res"></div></div>');
+    '<div class="card"><div class="tbl-wrap" id="r-res"></div></div>' +
+    '<div class="card"><div class="ph" style="margin-bottom:8px"><h3 style="margin:0">ของเสีย / หมดอายุ / อื่น ๆ (จ่ายออกที่ไม่ใช่ "นำไปใช้")</h3><button class="btn" onclick="exportWaste()">ส่งออก Excel</button></div>' +
+    '<div class="stats" id="w-sum"></div><div class="tbl-wrap" id="w-res"></div></div>');
   await runReport();
 };
+var WST = [];
+async function runWaste(){
+  var b = selNum('r-br'), from = $('r-from').value, to = $('r-to').value;
+  var rows = await fetchAll(function(){
+    var qb = sb.from('stock_moves').select('branch_id,product_id,qty_base,products(sku,name,base_unit_id,cost),stock_docs!inner(doc_type,reason,cancelled)')
+      .eq('stock_docs.doc_type', 'OUT').in('stock_docs.reason', ['WASTE','EXPIRED','OTHER']).eq('stock_docs.cancelled', false)
+      .eq('is_reversal', false).gte('move_date', from).lte('move_date', to).order('id');
+    return b ? qb.eq('branch_id', b) : qb;
+  });
+  var agg = {}, tot = {WASTE:0, EXPIRED:0, OTHER:0};
+  rows.forEach(function(m){
+    var p = m.products || {}, r = m.stock_docs.reason, k = m.branch_id + '|' + m.product_id;
+    var a = agg[k] || (agg[k] = {branch:bname(m.branch_id), sku:p.sku, name:p.name, unit:uname(p.base_unit_id), cost:Number(p.cost || 0), WASTE:0, EXPIRED:0, OTHER:0});
+    if (!(r in tot)) return;
+    a[r] += -Number(m.qty_base); a.value = (a.value || 0) + -Number(m.qty_base) * Number(p.cost || 0);
+    tot[r] += -Number(m.qty_base) * Number(p.cost || 0);
+  });
+  WST = Object.keys(agg).map(function(k){ var a = agg[k]; a.qty = a.WASTE + a.EXPIRED + a.OTHER; a.value = a.value || 0; return a; }).filter(function(a){ return a.qty; })
+    .sort(function(x, y){ return y.value - x.value; });
+  $h('w-sum').innerHTML = ['WASTE','EXPIRED','OTHER'].map(function(r){ return '<div class="stat' + (tot[r] > 0 ? ' alert' : '') + '"><div class="k">' + REASON[r] + ' (มูลค่าทุน)</div><div class="v">' + money(tot[r]) + '</div></div>'; }).join('') +
+    '<div class="stat"><div class="k">รวมทั้งหมด</div><div class="v">' + money(tot.WASTE + tot.EXPIRED + tot.OTHER) + '</div></div>';
+  $h('w-res').innerHTML = '<table><tr><th>สินค้า</th><th>สาขา</th><th class="num">ของเสีย</th><th class="num">หมดอายุ</th><th class="num">อื่น ๆ</th><th class="num">รวม</th><th class="num">มูลค่า (ทุน)</th></tr>' +
+    (WST.length ? WST.map(function(a){
+      return '<tr><td><b>' + esc(a.sku) + '</b> ' + esc(a.name) + '</td><td>' + esc(a.branch) + '</td><td class="num">' + (a.WASTE ? num(a.WASTE) : '-') + '</td><td class="num">' + (a.EXPIRED ? num(a.EXPIRED) : '-') +
+        '</td><td class="num">' + (a.OTHER ? num(a.OTHER) : '-') + '</td><td class="num"><b>' + num(a.qty) + '</b> ' + esc(a.unit) + '</td><td class="num low">' + money(a.value) + '</td></tr>';
+    }).join('') : '<tr><td colspan="7" class="empty">ไม่มีของเสียหรือหมดอายุในช่วงนี้ 👍</td></tr>') + '</table>';
+}
+function exportWaste(){
+  exportXlsx(WST.map(function(a){ return {'สาขา':a.branch, 'รหัส':a.sku, 'ชื่อสินค้า':a.name, 'หน่วย':a.unit, 'ของเสีย':a.WASTE, 'หมดอายุ':a.EXPIRED, 'อื่น ๆ':a.OTHER, 'รวม':a.qty, 'ต้นทุน/หน่วย':a.cost, 'มูลค่า':+a.value.toFixed(2)}; }),
+    'ของเสีย', 'ของเสีย_' + $('r-from').value + '_' + $('r-to').value + '.xlsx');
+}
 async function runReport(){
   var b = selNum('r-br'), from = $('r-from').value, to = $('r-to').value;
   if (!from || !to || from > to) return toast('ช่วงวันที่ไม่ถูกต้อง', 'bad');
   await busy(async function(){
     RPT = await fetchAll(function(){ return sb.rpc('stock_report', {p_branch:b, p_from:from, p_to:to}); });
+    runWaste().catch(function(e){ $h('w-res').innerHTML = '<p class="sub">' + esc(errMsg(e)) + '</p>'; });
     if (!b) { // ทุกสาขา: ตัดการโอนระหว่างสาขาออกจากเข้า/ออก
       var mine = myBranches().map(function(b){ return b.id; });
       var tr = (await fetchAll(function(){ return sb.from('stock_moves').select('product_id,qty_base,stock_docs!inner(doc_type,branch_id,to_branch_id)').eq('stock_docs.doc_type', 'TRANSFER').gte('move_date', from).lte('move_date', to); }))
@@ -1727,13 +1840,13 @@ async function exportMoves(src){
   var from = $(src === 'r' ? 'r-from' : 'd-from').value, to = $(src === 'r' ? 'r-to' : 'd-to').value;
   await busy(async function(){
     var rows = await fetchAll(function(){
-      var qb = sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,unit_cost,is_reversal,products(sku,name,base_unit_id),stock_docs' + (hideCancelled() ? '!inner' : '') + '(doc_no,doc_type,ref_no,note,created_by_name,cancelled)')
+      var qb = sb.from('stock_moves').select('move_date,branch_id,unit_id,qty,qty_base,unit_cost,is_reversal,products(sku,name,base_unit_id),stock_docs' + (hideCancelled() ? '!inner' : '') + '(doc_no,doc_type,ref_no,note,created_by_name,cancelled,reason)')
         .gte('move_date', from).lte('move_date', to).order('id');
       if (hideCancelled()) qb = qb.eq('stock_docs.cancelled', false);
       return b ? qb.eq('branch_id', b) : qb;
     });
     exportXlsx(rows.map(function(m){ var p = m.products || {}, d = m.stock_docs || {};
-      return {'วันที่':m.move_date, 'เลขที่เอกสาร':d.doc_no, 'ประเภท':TYPE[d.doc_type] + (m.is_reversal ? ' (ยกเลิก)' : ''), 'สาขา':bname(m.branch_id),
+      return {'วันที่':m.move_date, 'เลขที่เอกสาร':d.doc_no, 'ประเภท':TYPE[d.doc_type] + (m.is_reversal ? ' (ยกเลิก)' : ''), 'เหตุผล':d.doc_type === 'OUT' ? REASON[d.reason || 'USE'] : '', 'สาขา':bname(m.branch_id),
         'รหัส':p.sku, 'ชื่อสินค้า':p.name, 'จำนวน':Number(m.qty), 'หน่วย':uname(m.unit_id), 'จำนวน (หน่วยฐาน)':Number(m.qty_base), 'หน่วยฐาน':uname(p.base_unit_id),
         'ทุน/หน่วย':m.unit_cost != null ? Number(m.unit_cost) : '', 'อ้างอิง':d.ref_no || '', 'หมายเหตุ':d.note || '', 'บันทึกโดย':d.created_by_name || ''}; }),
       'เคลื่อนไหว', 'stock_moves_' + from + '_' + to + '.xlsx');
@@ -1754,6 +1867,9 @@ PAGES.settings = async function(){
         '<td class="num"><button class="btn sm" onclick="editBranch(' + b.id + ')">แก้ชื่อ</button> <button class="btn sm" onclick="toggleBranch(' + b.id + ')">' + (b.active ? 'ปิดใช้งาน' : 'เปิดใช้งาน') + '</button></td></tr>'; }).join('') +
       '</table></div><div class="row" style="margin-top:12px"><label class="f">รหัสสาขา (ใช้ในเลขที่เอกสาร) <input id="nb-code" maxlength="10" placeholder="เช่น BKK"></label><label class="f grow">ชื่อสาขา <input id="nb-name"></label><button class="btn pri" onclick="addBranch()">เพิ่มสาขา</button></div></div>';
     html += '<div class="card"><h3>ผู้ใช้งาน</h3><div class="tbl-wrap" id="u-res"></div></div>';
+    html += '<div class="card"><h3>สำรองข้อมูล</h3><p class="sub" id="bk-last" style="margin-top:-6px">กำลังตรวจสอบ...</p>' +
+      '<p class="sub">ดาวน์โหลดข้อมูลทั้งหมดเป็นไฟล์ Excel ไฟล์เดียว (สาขา หน่วย หมวด สินค้า คงเหลือ เอกสาร รายการเคลื่อนไหว ตรวจนับ ผู้ใช้) เก็บไว้ในคอมหรือ Google Drive · แนะนำทุกสัปดาห์</p>' +
+      '<button class="btn pri" onclick="backupAll()">สำรองข้อมูลทั้งหมด (Excel)</button></div>';
   }
   html += '<div class="cols2"><div class="card"><h3>หน่วยนับ</h3><div class="chips">' + S.units.map(function(u){ return '<span class="chip">' + esc(u.name) + '<button class="x" title="แก้ชื่อ" onclick="renameMaster(\'units\',' + u.id + ')">✎</button></span>'; }).join('') + '</div>' +
     '<div class="row" style="margin-top:12px"><input id="nu-name" class="grow" placeholder="ชื่อหน่วยใหม่"><button class="btn pri" onclick="addMaster(\'units\',\'nu-name\')">เพิ่ม</button></div></div>' +
@@ -1761,8 +1877,59 @@ PAGES.settings = async function(){
     '<div class="row" style="margin-top:12px"><input id="nc-name" class="grow" placeholder="ชื่อหมวดหมู่ใหม่"><button class="btn pri" onclick="addMaster(\'categories\',\'nc-name\')">เพิ่ม</button></div></div></div>';
   if (!SUPABASE_URL) html += '<div class="card"><h3>การเชื่อมต่อ</h3><p class="sub">เชื่อมต่ออยู่กับค่าที่บันทึกในเบราว์เซอร์นี้</p><button class="btn" onclick="if(confirm(\'ล้างการตั้งค่าการเชื่อมต่อ?\')){ls.del(\'stock_cfg\');logout().then(function(){location.reload()})}">เปลี่ยนการเชื่อมต่อ</button></div>';
   page(html);
-  if (isAdmin()) await loadUsers();
+  if (isAdmin()) { lastBackupText().then(function(t){ if ($('bk-last')) $('bk-last').innerHTML = t; }); await loadUsers(); }
 };
+// ---------- สำรองข้อมูล ----------
+async function lastBackup(){
+  try { var r = await q(sb.from('app_settings').select('value,updated_by').eq('key', 'last_backup').maybeSingle()); return r ? {at:new Date(r.value), by:r.updated_by} : null; }
+  catch(e){ return undefined; }
+}
+async function lastBackupText(){
+  var b = await lastBackup();
+  if (b === undefined) return '<span class="low">ยังไม่ได้รันไฟล์ update_password_reason_backup.sql</span>';
+  if (!b) return '<span class="low">ยังไม่เคยสำรองข้อมูล</span>';
+  var d = Math.floor((Date.now() - b.at) / 86400000);
+  return 'สำรองล่าสุด ' + thDateTime(b.at) + ' โดย ' + esc(b.by || '-') + ' (' + (d ? d + ' วันที่แล้ว' : 'วันนี้') + ')';
+}
+async function backupAll(){
+  if (!window.XLSX) return toast('โหลดไลบรารี Excel ไม่สำเร็จ', 'bad');
+  await busy(async function(){
+    var step = function(t){ $('loading').textContent = 'กำลังสำรอง: ' + t; };
+    var get = function(table, cols, order){ return fetchAll(function(){ return sb.from(table).select(cols || '*').order(order || 'id'); }); };
+    step('ข้อมูลหลัก'); await loadMaster();
+    var prods = await get('products'), pus = await get('product_units');
+    step('ยอดคงเหลือ'); var bals = await fetchAll(function(){ return sb.from('stock_balances').select('*').order('branch_id').order('product_id'); });
+    step('เอกสาร'); var docs = await get('stock_docs');
+    step('รายการเคลื่อนไหว'); var moves = await get('stock_moves');
+    step('ตรวจนับ'); var cs = [], cl = [];
+    try { cs = await get('count_sessions'); cl = await get('count_lines'); } catch(e){}
+    var users = await fetchAll(function(){ return sb.from('profiles').select('*').order('created_at'); });
+    var pmap = {}; prods.forEach(function(p){ pmap[p.id] = p; });
+    var cat = function(id){ return id && S.catMap[id] ? S.catMap[id].name : ''; };
+    var sheets = {
+      'สาขา': S.branches.map(function(b){ return {id:b.id, 'รหัส':b.code, 'ชื่อ':b.name, 'ใช้งาน':b.active ? 'ใช่' : 'ไม่'}; }),
+      'หน่วยนับ': S.units.map(function(u){ return {id:u.id, 'ชื่อ':u.name}; }),
+      'หมวดหมู่': S.cats.map(function(c){ return {id:c.id, 'ชื่อ':c.name}; }),
+      'สินค้า': prods.map(function(p){ return {id:p.id, 'รหัส':p.sku, 'ชื่อ':p.name, 'หมวดหมู่':cat(p.category_id), 'หน่วยฐาน':uname(p.base_unit_id), 'ต้นทุน':Number(p.cost), 'ราคาขาย':Number(p.price), 'จุดสั่งซื้อ':Number(p.min_qty), 'ใช้งาน':p.active ? 'ใช่' : 'ไม่', 'หมายเหตุ':p.note || '', 'รูป':p.image_url || ''}; }),
+      'หน่วยสินค้า': pus.map(function(u){ var p = pmap[u.product_id] || {}; return {'รหัสสินค้า':p.sku, 'ชื่อสินค้า':p.name, 'หน่วย':uname(u.unit_id), 'เท่ากับ(หน่วยฐาน)':Number(u.factor), 'บาร์โค้ด':u.barcode || ''}; }),
+      'คงเหลือ': bals.map(function(b){ var p = pmap[b.product_id] || {}; return {'สาขา':bname(b.branch_id), 'รหัส':p.sku, 'ชื่อสินค้า':p.name, 'คงเหลือ':Number(b.qty), 'หน่วยฐาน':uname(p.base_unit_id)}; }),
+      'เอกสาร': docs.map(function(d){ return {id:d.id, 'เลขที่':d.doc_no, 'ประเภท':typeLabel(d), 'สาขา':bname(d.branch_id), 'ไปสาขา':d.to_branch_id ? bname(d.to_branch_id) : '', 'วันที่':d.doc_date, 'อ้างอิง':d.ref_no || '', 'หมายเหตุ':d.note || '', 'บันทึกโดย':d.created_by_name || '', 'บันทึกเมื่อ':d.created_at, 'ยกเลิก':d.cancelled ? 'ใช่' : '', 'ยกเลิกโดย':d.cancelled_by_name || '', 'เหตุผลยกเลิก':d.cancel_reason || ''}; }),
+      'รายการเคลื่อนไหว': moves.map(function(m){ var p = pmap[m.product_id] || {}; return {'doc_id':m.doc_id, 'วันที่':m.move_date, 'สาขา':bname(m.branch_id), 'รหัส':p.sku, 'ชื่อสินค้า':p.name, 'จำนวน':Number(m.qty), 'หน่วย':uname(m.unit_id), 'ตัวคูณ':Number(m.factor), 'จำนวน(หน่วยฐาน)':Number(m.qty_base), 'ทุน/หน่วย':m.unit_cost != null ? Number(m.unit_cost) : '', 'รายการกลับ':m.is_reversal ? 'ใช่' : ''}; }),
+      'ตรวจนับ': cl.map(function(l){ var c = cs.find(function(x){ return x.id === l.session_id; }) || {}, p = pmap[l.product_id] || {};
+        return {'เลขที่':'CNT-' + l.session_id, 'สาขา':bname(c.branch_id), 'สถานะ':CSTAT[c.status] || '', 'นับโดย':c.counted_by_name || '', 'รหัส':p.sku, 'ชื่อสินค้า':p.name, 'ยอดระบบ':Number(l.system_base), 'นับได้':Number(l.counted_base)}; }),
+      'ผู้ใช้': users.map(function(u){ return {'ชื่อ':u.full_name || '', 'อีเมล':u.email, 'บทบาท':ROLE[u.role], 'สาขาหลัก':u.branch_id ? bname(u.branch_id) : '', 'อนุมัติ':u.active ? 'ใช่' : 'ไม่'}; })
+    };
+    step('สร้างไฟล์');
+    var wb = XLSX.utils.book_new();
+    Object.keys(sheets).forEach(function(n){ XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheets[n].length ? sheets[n] : [{'(ไม่มีข้อมูล)':''}]), n); });
+    XLSX.writeFile(wb, 'สำรองข้อมูล_8เซียนซุป_' + today() + '.xlsx');
+    try { await q(sb.rpc('mark_backup')); } catch(e){ console.warn(e); }
+    toast('สำรองข้อมูลแล้ว ' + docs.length + ' เอกสาร / ' + moves.length + ' รายการเคลื่อนไหว');
+    if ($('bk-last')) $('bk-last').innerHTML = await lastBackupText();
+    var bn = $('bk-banner'); if (bn) bn.remove();
+  });
+  $('loading').textContent = 'กำลังทำงาน...';
+}
 var EXTRA = {};   // profile_id -> [branch_id]
 async function loadUsers(){
   var users = await q(sb.from('profiles').select('*').order('created_at'));
@@ -1779,7 +1946,8 @@ async function loadUsers(){
       '<td>' + (u.role === 'admin' ? '<span class="sub">ทุกสาขาอยู่แล้ว</span>' : !extraOk ? '<span class="sub">รัน update_multi_branch.sql ก่อน</span>' :
         '<span class="sub">' + (ex || '-') + '</span> <button class="btn sm" onclick="editExtra(\'' + u.id + '\')">เลือกสาขา</button>') + '</td>' +
       '<td><input type="checkbox" id="ua-' + u.id + '"' + (u.active ? ' checked' : '') + (self ? ' disabled' : '') + '>' + (u.active ? '' : ' <span class="b b-ADJUST">รออนุมัติ</span>') + '</td>' +
-      '<td><button class="btn sm" onclick="saveUser(\'' + u.id + '\')">บันทึก</button></td></tr>';
+      '<td style="white-space:nowrap"><button class="btn sm" onclick="saveUser(\'' + u.id + '\')">บันทึก</button> ' +
+        (self ? '' : '<button class="btn sm" onclick="adminSetPass(\'' + u.id + '\',\'' + esc(u.full_name || u.email).replace(/'/g, '') + '\')">ตั้งรหัสผ่าน</button>') + '</td></tr>';
   }).join('') + '</table>';
 }
 function editExtra(id){
@@ -1797,6 +1965,16 @@ async function saveExtra(id, main){
     if (ids.length) await q(sb.from('profile_branches').insert(ids.map(function(b){ return {profile_id:id, branch_id:b}; })));
     closeModal(); toast('บันทึกสาขาเพิ่มเติมแล้ว (ผู้ใช้ต้องรีเฟรชหน้าเว็บ)'); await loadUsers();
   });
+}
+function adminSetPass(id, name){
+  openModal('<h2>ตั้งรหัสผ่านใหม่ให้ ' + esc(name) + '</h2>' +
+    '<p class="sub">ใช้เมื่อผู้ใช้ลืมรหัสผ่าน แจ้งรหัสนี้ให้เจ้าตัว แล้วแนะนำให้กด "เปลี่ยนรหัสผ่าน" เองหลังเข้าระบบ</p>' +
+    '<label class="f">รหัสผ่านใหม่ (อย่างน้อย 6 ตัวอักษร) <input id="ap-1" autocomplete="off" value="' + (Math.floor(100000 + Math.random() * 900000)) + '"></label>' +
+    '<div class="row end"><button class="btn" onclick="closeModal()">ยกเลิก</button><button class="btn pri" onclick="runAdminSetPass(\'' + id + '\')">ตั้งรหัสผ่าน</button></div>');
+}
+async function runAdminSetPass(id){
+  var pw = $('ap-1').value.trim(); if (pw.length < 6) return toast('รหัสผ่านอย่างน้อย 6 ตัวอักษร', 'bad');
+  await busy(async function(){ await q(sb.rpc('admin_set_password', {p_user:id, p_password:pw})); closeModal(); toast('ตั้งรหัสผ่านใหม่แล้ว: ' + pw); });
 }
 async function saveUser(id){
   var role = $('ur-' + id).value, br = $('ub-' + id).value ? Number($('ub-' + id).value) : null, act = $('ua-' + id).checked;
