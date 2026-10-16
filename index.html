@@ -1380,11 +1380,15 @@ async function submitTxn(){
   for (var i = 0; i < T.lines.length; i++) {
     var n = Number(T.lines[i].qty);
     if (T.lines[i].qty === '' || T.lines[i].qty == null) { var e1 = $('t-row-' + i); if (e1) { var qi2 = e1.querySelector('input[data-k="qty"]'); if (qi2) qi2.focus(); } return toast('ยังไม่ได้กรอกจำนวน: ' + T.lines[i].sku + ' ' + T.lines[i].name, 'bad'); }
-    if (!isFinite(n) || n === 0 || (T.type !== 'ADJUST' && n < 0)) return toast('จำนวนของ ' + T.lines[i].sku + ' ไม่ถูกต้อง', 'bad');
+    if (!isFinite(n) || (T.type !== 'ADJUST' && n < 0)) return toast('จำนวนของ ' + T.lines[i].sku + ' ไม่ถูกต้อง', 'bad');
   }
   if (T.type === 'TRANSFER' && !T.to) return toast('เลือกสาขาปลายทาง', 'bad');
-  if (!confirm('ยืนยันบันทึก' + TYPE[T.type] + (T.type === 'OUT' ? ' (' + REASON[T.reason || 'USE'] + ')' : '') + ' ' + T.lines.length + ' รายการ\nสาขา: ' + bname(T.branch) + (T.type === 'TRANSFER' ? ' → ' + bname(T.to) : '') + '\nวันที่: ' + thDate(T.date))) return;
-  var lines = T.lines.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty), unit_cost:(T.type !== 'IN' || l.cost === '' || l.cost == null) ? null : Number(l.cost)}; });
+  // จำนวน 0 = ไม่ได้ใช้/ของหมด ข้ามรายการนั้นไป ไม่บันทึก
+  var use = T.lines.filter(function(l){ return Number(l.qty) !== 0; }), skip = T.lines.length - use.length;
+  if (!use.length) return toast('ทุกรายการเป็นจำนวน 0 ไม่มีอะไรให้บันทึก (กด "ล้างรายการ" ได้เลย)', 'bad');
+  if (!confirm('ยืนยันบันทึก' + TYPE[T.type] + (T.type === 'OUT' ? ' (' + REASON[T.reason || 'USE'] + ')' : '') + ' ' + use.length + ' รายการ' +
+    (skip ? '\n(ข้าม ' + skip + ' รายการที่จำนวนเป็น 0)' : '') + '\nสาขา: ' + bname(T.branch) + (T.type === 'TRANSFER' ? ' → ' + bname(T.to) : '') + '\nวันที่: ' + thDate(T.date))) return;
+  var lines = use.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty), unit_cost:(T.type !== 'IN' || l.cost === '' || l.cost == null) ? null : Number(l.cost)}; });
   await busy(async function(){
     var doc = await q(sb.rpc('post_stock_doc', {p_type:T.type, p_branch:T.branch, p_to_branch:T.type === 'TRANSFER' ? T.to : null,
       p_doc_date:T.date, p_ref:T.ref || null, p_note:T.note || null, p_lines:lines, p_reason:T.type === 'OUT' ? (T.reason || 'USE') : null}));
@@ -1500,12 +1504,14 @@ async function submitReq(){
   if (!R.lines.length) return toast('ยังไม่มีรายการสินค้า', 'bad');
   for (var i = 0; i < R.lines.length; i++) {
     var n = Number(R.lines[i].qty);
-    if (R.lines[i].qty === '' || !isFinite(n) || n <= 0) { var rw = $('q-row-' + i); if (rw) rw.querySelector('input[data-k="qty"]').focus(); return toast('ยังไม่ได้กรอกจำนวน: ' + R.lines[i].sku + ' ' + R.lines[i].name, 'bad'); }
+    if (R.lines[i].qty === '' || !isFinite(n) || n < 0) { var rw = $('q-row-' + i); if (rw) rw.querySelector('input[data-k="qty"]').focus(); return toast('ยังไม่ได้กรอกจำนวน: ' + R.lines[i].sku + ' ' + R.lines[i].name, 'bad'); }
   }
-  if (!confirm('ส่งใบขอเบิก ' + R.lines.length + ' รายการ\nจาก ' + bname(R.to) + ' → ' + bname(R.from))) return;
+  var use = R.lines.filter(function(l){ return Number(l.qty) > 0; }), skip = R.lines.length - use.length;
+  if (!use.length) return toast('ทุกรายการเป็นจำนวน 0 ไม่มีอะไรให้ขอ', 'bad');
+  if (!confirm('ส่งใบขอเบิก ' + use.length + ' รายการ' + (skip ? ' (ข้าม ' + skip + ' รายการที่เป็น 0)' : '') + '\nจาก ' + bname(R.to) + ' → ' + bname(R.from))) return;
   await busy(async function(){
     var r = await q(sb.rpc('submit_requisition', {p_from:R.from, p_to:R.to, p_note:R.note || null,
-      p_lines: R.lines.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty)}; })}));
+      p_lines: use.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty)}; })}));
     R.lines = []; R.note = ''; saveReq(); ls.set('req_to', R.to);
     toast('ส่งใบขอเบิกแล้ว เลขที่ ' + r.req_no); R.tab = 'mine'; renderReqPage(); openReq(r.id);
   });
