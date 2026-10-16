@@ -69,6 +69,8 @@ td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 tr.click{cursor:pointer}
 tr.click:hover td{background:#f8fafc}
 tr.flash td{animation:flash 1s}
+tr.fixrow td{background:#fff4e5}
+.fixnote{font-size:12px;color:#b54708;font-weight:600;margin-top:4px;max-width:260px}
 @keyframes flash{from{background:#fff4d6}to{background:transparent}}
 td.empty{text-align:center;color:var(--muted);padding:28px}
 td input.qty{width:100px;text-align:right}
@@ -259,6 +261,8 @@ function toast(msg, type){
 }
 function errMsg(e){
   var m = (e && (e.message || e.error_description)) || String(e);
+  var um = m.match(/ไม่พบหน่วยของสินค้า id (\d+)/);
+  if (um) { var lt = ((T && T.lines) || []).concat((R && R.lines) || []).find(function(l){ return l.pid == um[1]; }); return 'หน่วยของสินค้า ' + (lt ? lt.sku + ' ' + lt.name : 'id ' + um[1]) + ' ถูกเปลี่ยนไปแล้ว กรุณาเลือกหน่วยใหม่ในแถวนั้น'; }
   if (/duplicate key/i.test(m)) {
     if (/barcode/.test(m)) return 'บาร์โค้ดนี้ถูกใช้กับสินค้าอื่นแล้ว';
     if (/sku/.test(m)) return 'รหัสสินค้านี้มีอยู่แล้ว';
@@ -390,6 +394,41 @@ function breakdown(pid, base){
 function qtyHtml(pid, base, unitId, cls){
   var b = breakdown(pid, base);
   return '<span class="' + (cls || '') + '"><b>' + num(base) + '</b> ' + esc(uname(unitId)) + '</span>' + (b ? '<div class="sub">= ' + esc(b) + '</div>' : '');
+}
+
+// ---------- ตรวจร่างที่ค้างไว้ กับข้อมูลสินค้าล่าสุด ----------
+// ถ้าสินค้าถูกแก้หน่วย/ปิดใช้งานหลังลงร่างไว้ (เช่น แก้จากอีกเครื่อง) ระบบจะปรับหน่วยให้และทำเครื่องหมายแถวนั้นไว้ให้ตรวจ
+async function syncDraftLines(lines){
+  var pids = lines.map(function(l){ return l.pid; }).filter(function(v, i, a){ return a.indexOf(v) === i; });
+  if (!pids.length) return 0;
+  pids.forEach(function(id){ delete PU[id]; });
+  await loadUnits(pids);
+  var info = {};
+  for (var i = 0; i < pids.length; i += 150) {
+    (await q(sb.from('products').select('id,sku,name,base_unit_id,image_url,active').in('id', pids.slice(i, i + 150)))).forEach(function(p){ info[p.id] = p; });
+  }
+  var fixed = 0;
+  lines.forEach(function(l){
+    var p = info[l.pid], units = PU[l.pid] || [];
+    l.fix = '';
+    if (!p) { l.fix = 'ไม่พบสินค้านี้แล้ว — ลบแถวนี้ออก'; fixed++; return; }
+    l.sku = p.sku; l.name = p.name; l.img = p.image_url || null; l.base_unit_id = p.base_unit_id;
+    if (!p.active) { l.fix = 'สินค้านี้ถูกปิดใช้งานแล้ว'; fixed++; }
+    if (!units.some(function(u){ return u.unit_id == l.unit_id; })) {
+      var old = uname(l.unit_id);
+      l.unit_id = (units.find(function(u){ return u.unit_id === p.base_unit_id; }) || units[0] || {}).unit_id || p.base_unit_id;
+      l.fix = (old && old !== '?' ? 'หน่วยเดิม "' + old + '"' : 'หน่วยที่ลงไว้') + ' ถูกเปลี่ยน/ลบไปแล้ว ระบบเปลี่ยนเป็น "' + uname(l.unit_id) + '" — ตรวจจำนวนอีกครั้ง'; fixed++;
+    }
+  });
+  return fixed;
+}
+function badUnitLine(lines){
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    if (l.qty !== '' && l.qty != null && Number(l.qty) === 0) continue;   // จำนวน 0 ถูกข้ามอยู่แล้ว
+    if (!(PU[l.pid] || []).some(function(u){ return u.unit_id == l.unit_id; })) return i;
+  }
+  return -1;
 }
 
 // ---------- ค้นหาสินค้า ----------
@@ -1267,9 +1306,11 @@ PAGES.txn = async function(){
   T.date = T.date || today(); T.bal = {};
   if (!myBranches().some(function(b){ return b.id === T.branch; })) T.branch = S.cur;
   if (!isMgr()) T.type = 'OUT';   // พนักงานบันทึกได้เฉพาะจ่ายออก
-  await loadUnits(T.lines.map(function(l){ return l.pid; }));
+  var fixed = 0;
+  try { fixed = await syncDraftLines(T.lines); saveTxn(); } catch(e){ await loadUnits(T.lines.map(function(l){ return l.pid; })); }
   if (curPage !== 'txn') return;
   renderTxn();
+  if (fixed) toast('มี ' + fixed + ' รายการที่ข้อมูลสินค้าเปลี่ยนไปตั้งแต่ลงไว้ (แถวสีส้ม) กรุณาตรวจหน่วยและจำนวนก่อนบันทึก', 'bad');
 };
 function setReason(k){
   T.reason = k; saveTxn();
@@ -1311,6 +1352,7 @@ function renderTxn(){
   tbl.addEventListener('input', function(e){
     var i = e.target.dataset.i, k = e.target.dataset.k; if (i == null) return;
     T.lines[i][k] = k === 'unit_id' ? Number(e.target.value) : e.target.value;
+    if (T.lines[i].fix) { T.lines[i].fix = ''; var fr = $('t-row-' + i); if (fr) { fr.classList.remove('fixrow'); var fn = fr.querySelector('.fixnote'); if (fn) fn.remove(); } }
     if (k === 'unit_id' && T.type === 'IN') { var p = T.lines[i]; if (p.unitCost != null) { p.cost = +(p.unitCost * factorOf(p.pid, p.unit_id)).toFixed(2); renderTxnLines(); } }
     saveTxn(); T.lines.forEach(function(_, j){ txnInfo(j); }); txnSum();
   });
@@ -1321,7 +1363,7 @@ function renderTxnLines(){
   var cost = T.type === 'IN';
   var html = '<tr><th>#</th><th>สินค้า</th><th>หน่วย</th><th class="num">จำนวน</th>' + (cost ? '<th class="num">ทุน/หน่วยที่เลือก</th>' : '') + '<th class="num">คงเหลือในสาขา</th><th></th></tr>';
   html += T.lines.length ? T.lines.map(function(l, i){
-    return '<tr id="t-row-' + i + '"><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.sku), esc(l.name)) + '</td>' +
+    return '<tr id="t-row-' + i + '"' + (l.fix ? ' class="fixrow"' : '') + '><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.sku), esc(l.name)) + (l.fix ? '<div class="fixnote">⚠ ' + esc(l.fix) + '</div>' : '') + '</td>' +
       '<td><select data-i="' + i + '" data-k="unit_id">' + (PU[l.pid] || []).map(function(u){ return '<option value="' + u.unit_id + '"' + (u.unit_id == l.unit_id ? ' selected' : '') + '>' + esc(u.name) + (u.factor !== 1 ? ' (' + num(u.factor) + ')' : '') + '</option>'; }).join('') + '</select></td>' +
       '<td class="num"><input class="qty" type="number" step="any" placeholder="0" data-i="' + i + '" data-k="qty" value="' + esc(l.qty) + '" onfocus="this.select()" onclick="this.select()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();$(\'t-scan\').focus()}"></td>' +
       (cost ? '<td class="num"><input class="qty" type="number" step="any" data-i="' + i + '" data-k="cost" value="' + esc(l.cost == null ? '' : l.cost) + '" placeholder="-"></td>' : '') +
@@ -1383,6 +1425,8 @@ async function submitTxn(){
     if (!isFinite(n) || (T.type !== 'ADJUST' && n < 0)) return toast('จำนวนของ ' + T.lines[i].sku + ' ไม่ถูกต้อง', 'bad');
   }
   if (T.type === 'TRANSFER' && !T.to) return toast('เลือกสาขาปลายทาง', 'bad');
+  var bu = badUnitLine(T.lines);
+  if (bu >= 0) { var br = $('t-row-' + bu); if (br) br.scrollIntoView({block:'center'}); return toast('หน่วยของ ' + T.lines[bu].sku + ' ' + T.lines[bu].name + ' ไม่มีแล้ว กรุณาเลือกหน่วยใหม่', 'bad'); }
   // จำนวน 0 = ไม่ได้ใช้/ของหมด ข้ามรายการนั้นไป ไม่บันทึก
   var use = T.lines.filter(function(l){ return Number(l.qty) !== 0; }), skip = T.lines.length - use.length;
   if (!use.length) return toast('ทุกรายการเป็นจำนวน 0 ไม่มีอะไรให้บันทึก (กด "ล้างรายการ" ได้เลย)', 'bad');
@@ -1422,9 +1466,11 @@ PAGES.req = async function(){
     R.tab = 'new';
     if (isMgr()) { try { var c = await sb.from('requisitions').select('id', {count:'exact', head:true}).eq('status', 'pending').in('to_branch_id', myBranchIds()); if (c.count) R.tab = 'in'; } catch(e){} }
   }
-  await loadUnits(R.lines.map(function(l){ return l.pid; }));
+  var fixed = 0;
+  try { fixed = await syncDraftLines(R.lines); saveReq(); } catch(e){ await loadUnits(R.lines.map(function(l){ return l.pid; })); }
   if (curPage !== 'req') return;
   renderReqPage();
+  if (fixed && R.tab === 'new') toast('มี ' + fixed + ' รายการที่ข้อมูลสินค้าเปลี่ยนไป (แถวสีส้ม) กรุณาตรวจก่อนส่ง', 'bad');
 };
 function setReqTab(t){ R.tab = t; renderReqPage(); }
 function reqTabs(){
@@ -1452,7 +1498,9 @@ function renderReqPage(){
   attachPicker('q-scan', addReqLine);
   $('q-tbl').addEventListener('input', function(e){
     var i = e.target.dataset.i, k = e.target.dataset.k; if (i == null) return;
-    R.lines[i][k] = k === 'unit_id' ? Number(e.target.value) : e.target.value; saveReq(); reqSum();
+    R.lines[i][k] = k === 'unit_id' ? Number(e.target.value) : e.target.value;
+    if (R.lines[i].fix) { R.lines[i].fix = ''; var fr = $('q-row-' + i); if (fr) { fr.classList.remove('fixrow'); var fn = fr.querySelector('.fixnote'); if (fn) fn.remove(); } }
+    saveReq(); reqSum();
   });
   renderReqLines(); reqBal();
   $('q-scan').focus();
@@ -1460,7 +1508,7 @@ function renderReqPage(){
 function renderReqLines(){
   $h('q-tbl').innerHTML = '<tr><th>#</th><th>สินค้า</th><th>หน่วย</th><th class="num">จำนวนที่ขอ</th><th class="num">คงเหลือในสาขา</th><th></th></tr>' +
     (R.lines.length ? R.lines.map(function(l, i){
-      return '<tr id="q-row-' + i + '"><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.sku), esc(l.name)) + '</td>' +
+      return '<tr id="q-row-' + i + '"' + (l.fix ? ' class="fixrow"' : '') + '><td>' + (i + 1) + '</td><td>' + pcell(l.img, esc(l.sku), esc(l.name)) + (l.fix ? '<div class="fixnote">⚠ ' + esc(l.fix) + '</div>' : '') + '</td>' +
         '<td><select data-i="' + i + '" data-k="unit_id">' + (PU[l.pid] || []).map(function(u){ return '<option value="' + u.unit_id + '"' + (u.unit_id == l.unit_id ? ' selected' : '') + '>' + esc(u.name) + (u.factor !== 1 ? ' (' + num(u.factor) + ')' : '') + '</option>'; }).join('') + '</select></td>' +
         '<td class="num"><input class="qty" type="number" min="0" step="any" placeholder="0" data-i="' + i + '" data-k="qty" value="' + esc(l.qty) + '" onfocus="this.select()" onclick="this.select()" onkeydown="if(event.key===\'Enter\'){event.preventDefault();$(\'q-scan\').focus()}"></td>' +
         '<td class="num" id="q-bal-' + i + '"></td>' +
@@ -1506,6 +1554,8 @@ async function submitReq(){
     var n = Number(R.lines[i].qty);
     if (R.lines[i].qty === '' || !isFinite(n) || n < 0) { var rw = $('q-row-' + i); if (rw) rw.querySelector('input[data-k="qty"]').focus(); return toast('ยังไม่ได้กรอกจำนวน: ' + R.lines[i].sku + ' ' + R.lines[i].name, 'bad'); }
   }
+  var bq = badUnitLine(R.lines);
+  if (bq >= 0) return toast('หน่วยของ ' + R.lines[bq].sku + ' ' + R.lines[bq].name + ' ไม่มีแล้ว กรุณาเลือกหน่วยใหม่', 'bad');
   var use = R.lines.filter(function(l){ return Number(l.qty) > 0; }), skip = R.lines.length - use.length;
   if (!use.length) return toast('ทุกรายการเป็นจำนวน 0 ไม่มีอะไรให้ขอ', 'bad');
   if (!confirm('ส่งใบขอเบิก ' + use.length + ' รายการ' + (skip ? ' (ข้าม ' + skip + ' รายการที่เป็น 0)' : '') + '\nจาก ' + bname(R.to) + ' → ' + bname(R.from))) return;
@@ -1759,6 +1809,7 @@ async function countPendingN(){
 PAGES.count = async function(){
   var br = (C && C.branch) || S.cur;
   C = {branch:br, rows:ls.get('count_draft_' + br, []), bal:{}, hide:C ? C.hide : false, zero:false, tab:(C && C.tab) || 'count', pendingN:C ? C.pendingN : 0};
+  C.rows.forEach(function(r){ delete PU[r.pid]; });
   await Promise.all([loadUnits(C.rows.map(function(r){ return r.pid; })), countPendingN()]);
   if (curPage !== 'count') return;
   if (C.tab !== 'count') return renderSessions();
