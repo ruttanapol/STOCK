@@ -310,8 +310,22 @@ function beep(ok){
 function exportXlsx(rows, sheet, file){
   if (!window.XLSX) return toast('โหลดไลบรารี Excel ไม่สำเร็จ', 'bad');
   if (!rows.length) return toast('ไม่มีข้อมูลให้ส่งออก', 'bad');
-  var ws = XLSX.utils.json_to_sheet(rows), wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheet); XLSX.writeFile(wb, file);
+  var wb = XLSX.utils.book_new();
+  xlsxAddSheet(wb, rows, sheet); XLSX.writeFile(wb, file);
+}
+// เพิ่มชีต: หัวตารางพิมพ์ซ้ำทุกหน้า + ความกว้างคอลัมน์อัตโนมัติ + แถวสูงพอสำหรับสระ/วรรณยุกต์ไทย
+function xlsxAddSheet(wb, rows, name){
+  var ws = XLSX.utils.json_to_sheet(rows), keys = rows.length ? Object.keys(rows[0]) : [];
+  var len = function(v){ return String(v == null ? '' : v).replace(/[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]/g, '').length; };   // ไม่นับสระบน/ล่าง
+  ws['!cols'] = keys.map(function(k){
+    var w = len(k); rows.forEach(function(r){ w = Math.max(w, len(r[k])); });
+    return {wch: Math.min(Math.max(w + 2, 6), 45)};
+  });
+  ws['!rows'] = [{hpt:24}]; for (var i = 0; i < rows.length; i++) ws['!rows'].push({hpt:20});
+  XLSX.utils.book_append_sheet(wb, ws, name);
+  wb.Workbook = wb.Workbook || {}; wb.Workbook.Names = wb.Workbook.Names || [];
+  wb.Workbook.Names.push({Name:'_xlnm.Print_Titles', Sheet:wb.SheetNames.length - 1, Ref:"'" + name.replace(/'/g, "''") + "'!$1:$1"});
+  return ws;
 }
 function cleanTerm(t){ return String(t || '').replace(/[%,()*\\]/g, ' ').trim(); }
 
@@ -2073,7 +2087,7 @@ PAGES.report = async function(){
   page('<div class="ph"><h1>รายงานความเคลื่อนไหวสินค้า</h1></div>' +
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('r-br', {all:true}) + '</label>' +
     '<label class="f">ตั้งแต่ <input type="date" id="r-from" value="' + monthStart() + '"></label><label class="f">ถึง <input type="date" id="r-to" value="' + today() + '"></label>' +
-    '<button class="btn pri" onclick="runReport()">แสดงรายงาน</button><button class="btn" onclick="exportReport()">ส่งออก Excel</button><button class="btn" onclick="exportMoves(\'r\')">ส่งออกรายการเคลื่อนไหว</button></div>' +
+    '<button class="btn pri" onclick="runReport()">แสดงรายงาน</button><button class="btn" onclick="printReport()">พิมพ์</button><button class="btn" onclick="exportReport()">ส่งออก Excel</button><button class="btn" onclick="exportMoves(\'r\')">ส่งออกรายการเคลื่อนไหว</button></div>' +
     '<p class="sub">ยอดยกมา + รับเข้า − จ่ายออก = คงเหลือ (หน่วยฐาน) · รวมการโอน ปรับยอด ตรวจนับ และรายการยกเลิก' + (multiBranch() ? ' · "ทุกสาขา" = รวมทุกสาขาที่มีสิทธิ์ และไม่นับการโอนระหว่างสาขาในกลุ่มเป็นเข้า/ออก' : '') + '</p></div>' +
     '<div class="card"><div class="tbl-wrap" id="r-res"></div></div>' +
     '<div class="card"><div class="ph" style="margin-bottom:8px"><h3 style="margin:0">ของเสีย / หมดอายุ / อื่น ๆ (จ่ายออกที่ไม่ใช่ "นำไปใช้")</h3><button class="btn" onclick="exportWaste()">ส่งออก Excel</button></div>' +
@@ -2132,6 +2146,25 @@ async function runReport(){
       }).join('') + '<tr><td colspan="7" class="num"><b>มูลค่ารวม</b></td><td class="num"><b>' + money(tot) + '</b></td></tr>'
       : '<tr><td colspan="8" class="empty">ไม่มีความเคลื่อนไหวในช่วงนี้</td></tr>') + '</table>';
   });
+}
+function printReport(){
+  if (!RPT.length) return toast('ไม่มีข้อมูลให้พิมพ์ กด "แสดงรายงาน" ก่อน', 'bad');
+  var b = selNum('r-br'), tot = 0;
+  var body = RPT.map(function(r, i){ tot += Number(r.closing_value);
+    return '<tr><td>' + (i + 1) + '</td><td>' + esc(r.sku) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.unit_name) + '</td><td class="n">' + num(r.opening) + '</td><td class="n">' + num(r.qty_in) +
+      '</td><td class="n">' + num(r.qty_out) + '</td><td class="n"><b>' + num(r.closing) + '</b></td><td class="n">' + money(r.closing_value) + '</td></tr>'; }).join('');
+  var w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาตป๊อปอัป', 'bad');
+  w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>รายงานความเคลื่อนไหวสินค้า</title><style>' +
+    'body{font-family:Sarabun,Tahoma,sans-serif;font-size:13px;margin:0;padding:16px}h2{margin:2px 0 4px;font-size:18px}p{margin:0 0 10px}' +
+    'table{width:100%;border-collapse:collapse}th,td{border:1px solid #999;padding:4px 6px;line-height:1.5}th{background:#eee}td.n,th.n{text-align:right;white-space:nowrap}' +
+    'thead{display:table-header-group}tfoot{display:table-row-group}tr{page-break-inside:avoid;break-inside:avoid}' +
+    '@page{size:A4;margin:12mm}@media print{body{padding:0}th{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body>' +
+    '<div style="font-weight:700;color:#a8231f">' + SHOP_NAME + '</div><h2>รายงานความเคลื่อนไหวสินค้า</h2>' +
+    '<p>สาขา ' + esc(b ? bname(b) : 'ทุกสาขา') + ' · ' + thDate($('r-from').value) + ' – ' + thDate($('r-to').value) + ' · หน่วยฐาน · พิมพ์เมื่อ ' + thDateTime(new Date()) + '</p>' +
+    '<table><thead><tr><th>#</th><th>รหัส</th><th>ชื่อสินค้า</th><th>หน่วย</th><th class="n">ยกมา</th><th class="n">รับเข้า</th><th class="n">จ่ายออก</th><th class="n">คงเหลือ</th><th class="n">มูลค่า (ทุน)</th></tr></thead>' +
+    '<tbody>' + body + '</tbody><tfoot><tr><td colspan="8" class="n"><b>มูลค่ารวม</b></td><td class="n"><b>' + money(tot) + '</b></td></tr></tfoot></table>' +
+    '<script>window.onload=function(){window.print()}<\/script></body></html>');
+  w.document.close();
 }
 function exportReport(){
   exportXlsx(RPT.map(function(r){ return {'รหัส':r.sku, 'ชื่อสินค้า':r.name, 'หน่วย':r.unit_name, 'ยกมา':Number(r.opening), 'รับเข้า':Number(r.qty_in),
@@ -2224,7 +2257,7 @@ async function backupAll(){
     };
     step('สร้างไฟล์');
     var wb = XLSX.utils.book_new();
-    Object.keys(sheets).forEach(function(n){ XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheets[n].length ? sheets[n] : [{'(ไม่มีข้อมูล)':''}]), n); });
+    Object.keys(sheets).forEach(function(n){ xlsxAddSheet(wb, sheets[n].length ? sheets[n] : [{'(ไม่มีข้อมูล)':''}], n); });
     XLSX.writeFile(wb, 'สำรองข้อมูล_8เซียนซุป_' + today() + '.xlsx');
     try { await q(sb.rpc('mark_backup')); } catch(e){ console.warn(e); }
     toast('สำรองข้อมูลแล้ว ' + docs.length + ' เอกสาร / ' + moves.length + ' รายการเคลื่อนไหว');
