@@ -1303,7 +1303,7 @@ var T = null;
 function saveTxn(){ ls.set('txn_draft', {type:T.type, branch:T.branch, to:T.to, ref:T.ref, note:T.note, lines:T.lines, reason:T.reason}); }
 PAGES.txn = async function(){
   if (!T) T = Object.assign({type:'IN', branch:null, to:null, ref:'', note:'', lines:[]}, ls.get('txn_draft', {}));
-  T.date = T.date || today(); T.bal = {};
+  T.date = isAdmin() ? (T.date || today()) : today(); T.bal = {};   // วันที่เอกสาร = วันนี้เสมอ (ผู้ดูแลเลือกย้อนหลังได้)
   if (!myBranches().some(function(b){ return b.id === T.branch; })) T.branch = S.cur;
   if (!isMgr()) T.type = 'OUT';   // พนักงานบันทึกได้เฉพาะจ่ายออก
   var fixed = 0;
@@ -1321,7 +1321,7 @@ function setTxnType(t){ if (!isMgr()) t = 'OUT'; readTxnHead(); T.type = t; save
 function readTxnHead(){
   if (!$('t-br')) return;
   T.branch = selNum('t-br'); T.to = $('t-to') ? selNum('t-to') : T.to;
-  T.date = $('t-date').value || today(); T.ref = $('t-ref').value.trim(); T.note = $('t-note').value.trim();
+  T.date = isAdmin() && $('t-date') ? ($('t-date').value || today()) : today(); T.ref = $('t-ref').value.trim(); T.note = $('t-note').value.trim();
 }
 function toOptions(){
   return '<option value="">— เลือกสาขาปลายทาง —</option>' + S.branches.filter(function(b){ return b.active && b.id !== T.branch; })
@@ -1334,7 +1334,8 @@ function renderTxn(){
     '<div class="card"><div class="row">' +
     '<label class="f">' + (T.type === 'TRANSFER' ? 'จากสาขา' : 'สาขา') + ' ' + branchSel('t-br', {value:T.branch}) + '</label>' +
     (T.type === 'TRANSFER' ? '<label class="f">ไปสาขา <select id="t-to">' + toOptions() + '</select></label>' : '') +
-    '<label class="f">วันที่ <input type="date" id="t-date" value="' + T.date + '" max="' + today() + '"></label>' +
+    (isAdmin() ? '<label class="f">วันที่ (ผู้ดูแลเลือกย้อนหลังได้) <input type="date" id="t-date" value="' + T.date + '" max="' + today() + '"></label>'
+      : '<label class="f">วันที่ <input value="' + thDate(today()) + ' (วันนี้)" disabled title="ระบบลงวันที่เป็นวันที่บันทึกจริงเสมอ"></label>') +
     '<label class="f">เลขที่อ้างอิง <input id="t-ref" value="' + esc(T.ref) + '" placeholder="' + (T.type === 'IN' ? 'เลขที่ใบส่งของ/ใบสั่งซื้อ' : 'ถ้ามี') + '"></label>' +
     '<label class="f grow">หมายเหตุ <input id="t-note" value="' + esc(T.note) + '"></label></div>' +
     (T.type === 'OUT' ? '<div class="row" style="margin-top:12px;align-items:center"><span class="sub">เหตุผล</span><div class="seg" style="margin:0" id="t-reason">' +
@@ -1435,7 +1436,7 @@ async function submitTxn(){
   var lines = use.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty), unit_cost:(T.type !== 'IN' || l.cost === '' || l.cost == null) ? null : Number(l.cost)}; });
   await busy(async function(){
     var doc = await q(sb.rpc('post_stock_doc', {p_type:T.type, p_branch:T.branch, p_to_branch:T.type === 'TRANSFER' ? T.to : null,
-      p_doc_date:T.date, p_ref:T.ref || null, p_note:T.note || null, p_lines:lines, p_reason:T.type === 'OUT' ? (T.reason || 'USE') : null}));
+      p_doc_date:isAdmin() ? T.date : today(), p_ref:T.ref || null, p_note:T.note || null, p_lines:lines, p_reason:T.type === 'OUT' ? (T.reason || 'USE') : null}));
     T.lines = []; T.ref = ''; T.note = ''; T.date = today(); T.reason = 'USE'; saveTxn(); renderTxn();
     toast('บันทึกแล้ว เลขที่ ' + doc.doc_no); showDoc(doc.id);
   });
