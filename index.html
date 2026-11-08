@@ -150,6 +150,12 @@ input.qty:placeholder-shown{border-color:#f0b4ad;background:var(--bad-soft)}
 .dl dt{color:var(--muted)}
 .dl dd{margin:0}
 @media print{.side,.topbar{display:none}}
+/* หน้าพิมพ์ในแอป (แทนการเปิดหน้าต่างใหม่ ซึ่งในมือถือ/แอป LINE มักขึ้นหน้าขาว) */
+#pv-wrap{position:fixed;inset:0;z-index:9999;background:#fff;overflow:auto;-webkit-overflow-scrolling:touch}
+#pv-bar{position:sticky;top:0;z-index:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;background:#1d2939;color:#fff;font-size:14px}
+#pv-bar .sp{flex:1;min-width:120px}#pv-bar .warn{flex-basis:100%;background:#fff4e5;color:#b54708;padding:8px 10px;border-radius:8px;font-weight:600}
+#pv-bar button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:8px 16px;cursor:pointer}#pv-bar .p{background:#fff;color:#1d2939}#pv-bar .c{background:#475467;color:#fff}
+@media print{body.pv-on > *:not(#pv-wrap){display:none!important}body.pv-on #pv-wrap{position:static;overflow:visible}#pv-bar{display:none!important}}
 </style>
 </head>
 <body>
@@ -324,8 +330,38 @@ function xlsxAddSheet(wb, rows, name){
   ws['!rows'] = [{hpt:24}]; for (var i = 0; i < rows.length; i++) ws['!rows'].push({hpt:20});
   XLSX.utils.book_append_sheet(wb, ws, name);
   wb.Workbook = wb.Workbook || {}; wb.Workbook.Names = wb.Workbook.Names || [];
-  wb.Workbook.Names.push({Name:'_xlnm.Print_Titles', Sheet:wb.SheetNames.length - 1, Ref:"'" + name.replace(/'/g, "''") + "'!$1:$1"});
+  wb.Workbook.Names.push({Name:'_xlnm.Print_Titles', Sheet:Math.max((wb.SheetNames || []).length - 1, 0), Ref:"'" + name.replace(/'/g, "''") + "'!$1:$1"});
   return ws;
+}
+// ---------- พิมพ์ในแอป ----------
+// ฟังก์ชันพิมพ์เดิมเขียน HTML ลงหน้าต่างใหม่ (window.open) ซึ่งในแอปบนหน้าจอโฮม iPhone และเบราว์เซอร์ในแอป LINE มักได้หน้าขาว
+// ตอนนี้เก็บ HTML ไว้แล้วแสดงทับหน้าเดิม (Shadow DOM แยกสไตล์) แล้วสั่งพิมพ์จากหน้านี้เลย
+function printWin(){
+  var buf = '';
+  return {document:{open:function(){ buf = ''; }, write:function(h){ buf += h; }, close:function(){ showPrint(buf); }}, close:function(){}};
+}
+function inAppBrowser(){ return /\bLine\/|FBAN|FBAV|Instagram|MicroMessenger/i.test(navigator.userAgent || ''); }
+function showPrint(html){
+  closePrint();
+  var doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.querySelectorAll('script').forEach(function(x){ x.remove(); });
+  var css = Array.prototype.map.call(doc.querySelectorAll('style'), function(x){ return x.textContent; }).join('\n');
+  var pageRules = (css.match(/@page\s*\{[^}]*\}/g) || []).join('\n') || '@page{size:A4;margin:12mm}';
+  css = css.replace(/@page\s*\{[^}]*\}/g, '').replace(/(^|[}\s,])body(?=\s*[{,.:\s])/g, '$1.pvbody');
+  var st = document.createElement('style'); st.id = 'pv-page'; st.textContent = '@media print{' + pageRules + '}'; document.head.appendChild(st);
+  var wrap = document.createElement('div'); wrap.id = 'pv-wrap';
+  var warn = inAppBrowser() ? '<div class="warn">เบราว์เซอร์ในแอป LINE/Facebook สั่งพิมพ์ไม่ได้ — กดเมนู ⋮ หรือ ⋯ มุมขวา แล้วเลือก "เปิดในเบราว์เซอร์" (Safari/Chrome) แล้วพิมพ์ใหม่</div>' : '';
+  wrap.innerHTML = '<div id="pv-bar"><span class="sp">' + esc(doc.title || 'พิมพ์') + '</span><button class="p" onclick="doPrint()">พิมพ์ / บันทึก PDF</button><button class="c" onclick="closePrint()">ปิด</button>' + warn + '</div><div id="pv-host"></div>';
+  document.body.appendChild(wrap); document.body.classList.add('pv-on');
+  var root = $('pv-host').attachShadow({mode:'open'});
+  root.innerHTML = '<style>:host{display:block;background:#fff;color:#000}.pvbody{display:block;background:#fff;color:#000;font-family:"IBM Plex Sans Thai",sans-serif}' + css + '</style><div class="pvbody">' + doc.body.innerHTML + '</div>';
+  if (!inAppBrowser()) (document.fonts ? document.fonts.ready : Promise.resolve()).then(function(){ setTimeout(doPrint, 350); });
+}
+function doPrint(){ try { window.print(); } catch(e){ toast('เบราว์เซอร์นี้สั่งพิมพ์ไม่ได้ ลองเปิดใน Safari หรือ Chrome', 'bad'); } }
+function closePrint(){
+  var w = $('pv-wrap'); if (w) w.remove();
+  var st = $('pv-page'); if (st) st.remove();
+  document.body.classList.remove('pv-on');
 }
 function cleanTerm(t){ return String(t || '').replace(/[%,()*\\]/g, ' ').trim(); }
 
@@ -1185,7 +1221,7 @@ function openBarcodeModal(){
 async function printBarcodes(){
   if (!window.JsBarcode) return toast('โหลดตัวสร้างบาร์โค้ดไม่สำเร็จ ลองรีเฟรชหน้าเว็บ', 'bad');
   var cat = selNum('bc-cat'), fmt = $('bc-fmt').value, big = $('bc-big').checked, gen = !!($('bc-gen') && $('bc-gen').checked);
-  var w = window.open('', '_blank');   // เปิดทันทีตอนกด เพื่อไม่ให้เบราว์เซอร์บล็อก
+  var w = printWin();   // เปิดทันทีตอนกด เพื่อไม่ให้เบราว์เซอร์บล็อก
   if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างใหม่ กรุณาอนุญาต pop-up ให้เว็บนี้', 'bad');
   w.document.write('<p style="font-family:sans-serif;padding:24px">กำลังเตรียมบาร์โค้ด...</p>');
   closeModal();
@@ -1694,7 +1730,7 @@ function copyReq(){
   if (curPage === 'req') PAGES.req(); else go('req');
 }
 function printReq(){
-  var r = RQ.r, w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
+  var r = RQ.r, w = printWin(); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
   var done = r.status === 'approved';
   var rows = RQ.lines.map(function(l, i){ return '<tr><td style="text-align:center">' + (i + 1) + '</td><td>' + esc(l.sku) + '</td><td>' + esc(l.name) + '</td><td style="text-align:right">' + num(l.req) + '</td><td>' + esc(uname(l.unit)) +
     '</td><td style="text-align:right">' + (done ? num(l.app) : '') + '</td><td></td></tr>'; }).join('');
@@ -1787,7 +1823,7 @@ async function cancelDoc(id){
 }
 function printDoc(){
   if (!DOC) return;
-  var d = DOC.d, w = window.open('', '_blank');
+  var d = DOC.d, w = printWin();
   if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
   var rows = DOC.lines.map(function(m, i){
     var p = m.products || {};
@@ -1911,7 +1947,7 @@ async function countLoadCat(){
 // ใบนับสต๊อกแบบกระดาษ: เรียงตามรายการบนหน้าจอ ไม่แสดงยอดในระบบ (นับแบบไม่เห็นยอด)
 function printCountSheet(){
   if (!C.rows.length) return toast('โหลดรายการสินค้าก่อน แล้วค่อยพิมพ์ใบนับ', 'bad');
-  var w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
+  var w = printWin(); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
   var maxU = Math.max.apply(null, C.rows.map(function(r){ return (PU[r.pid] || []).length || 1; }));
   var rows = C.rows.map(function(r, i){
     var us = (PU[r.pid] || []).map(function(u){ return '<td class="u">........ ' + esc(u.name) + '</td>'; });
@@ -2066,7 +2102,7 @@ function crRows(){
 }
 function exportCountReview(){ exportXlsx(crRows(), 'ผลตรวจนับ', 'ตรวจนับ_CNT-' + CR.s.id + '_' + bname(CR.s.branch_id) + '.xlsx'); }
 function printCountReview(){
-  var w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
+  var w = printWin(); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์', 'bad');
   var t = crCalc(), s = CR.s;
   var rows = crRows().map(function(r, i){ var c = r['ผลต่าง'] < 0 ? ' style="color:#b42318"' : '';
     return '<tr><td>' + (i + 1) + '</td><td>' + esc(r['รหัส']) + '</td><td>' + esc(r['ชื่อสินค้า']) + '</td><td>' + esc(r['หน่วย']) + '</td><td class="n">' + num(r['ยอดระบบตอนนับ']) + '</td><td class="n">' + num(r['นับได้']) +
@@ -2153,7 +2189,7 @@ function printReport(){
   var body = RPT.map(function(r, i){ tot += Number(r.closing_value);
     return '<tr><td>' + (i + 1) + '</td><td>' + esc(r.sku) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.unit_name) + '</td><td class="n">' + num(r.opening) + '</td><td class="n">' + num(r.qty_in) +
       '</td><td class="n">' + num(r.qty_out) + '</td><td class="n"><b>' + num(r.closing) + '</b></td><td class="n">' + money(r.closing_value) + '</td></tr>'; }).join('');
-  var w = window.open('', '_blank'); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาตป๊อปอัป', 'bad');
+  var w = printWin(); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาตป๊อปอัป', 'bad');
   w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>รายงานความเคลื่อนไหวสินค้า</title><style>' +
     'body{font-family:Sarabun,Tahoma,sans-serif;font-size:13px;margin:0;padding:16px}h2{margin:2px 0 4px;font-size:18px}p{margin:0 0 10px}' +
     'table{width:100%;border-collapse:collapse}th,td{border:1px solid #999;padding:4px 6px;line-height:1.5}th{background:#eee}td.n,th.n{text-align:right;white-space:nowrap}' +
