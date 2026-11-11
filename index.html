@@ -150,6 +150,7 @@ input.qty:placeholder-shown{border-color:#f0b4ad;background:var(--bad-soft)}
 .dl dt{color:var(--muted)}
 .dl dd{margin:0}
 @media print{.side,.topbar{display:none}}
+.tag-back{display:inline-block;font-size:11px;font-weight:600;color:#b54708;background:#fff4e5;border-radius:6px;padding:1px 6px;margin-left:4px;white-space:nowrap}
 /* หน้าพิมพ์ในแอป (แทนการเปิดหน้าต่างใหม่ ซึ่งในมือถือ/แอป LINE มักขึ้นหน้าขาว) */
 #pv-wrap{position:fixed;inset:0;z-index:9999;background:#fff;overflow:auto;-webkit-overflow-scrolling:touch}
 #pv-bar{position:sticky;top:0;z-index:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;background:#1d2939;color:#fff;font-size:14px}
@@ -332,6 +333,31 @@ function xlsxAddSheet(wb, rows, name){
   wb.Workbook = wb.Workbook || {}; wb.Workbook.Names = wb.Workbook.Names || [];
   wb.Workbook.Names.push({Name:'_xlnm.Print_Titles', Sheet:Math.max((wb.SheetNames || []).length - 1, 0), Ref:"'" + name.replace(/'/g, "''") + "'!$1:$1"});
   return ws;
+}
+// ---------- วันที่ลงย้อนหลัง ----------
+var BACKDAYS = 3;
+async function loadBackdays(){
+  try { var r = await q(sb.from('app_settings').select('value').eq('key', 'backdate_days').maybeSingle()); return r && r.value != null ? Number(r.value) : 3; }
+  catch(e){ return BACKDAYS; }
+}
+function addDays(iso, n){ var d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0,10); }
+function minTxnDate(){ return addDays(today(), -BACKDAYS); }
+function clampTxnDate(v){
+  v = v || today();
+  if (v > today()) return today();
+  if (!isAdmin() && v < minTxnDate()) return minTxnDate();
+  return v;
+}
+function backdated(d){   // วันที่เอกสารเก่ากว่าวันที่กดบันทึกจริง (เวลาไทย)
+  if (!d.created_at) return 0;
+  var c = new Date(new Date(d.created_at).getTime() + 7 * 3600000).toISOString().slice(0,10);
+  return Math.round((new Date(c + 'T00:00:00Z') - new Date(String(d.doc_date).slice(0,10) + 'T00:00:00Z')) / 86400000);
+}
+function backTag(d){ var n = backdated(d); return n > 0 ? ' <span class="tag-back" title="บันทึกจริง ' + esc(thDateTime(d.created_at)) + '">ลงย้อนหลัง ' + n + ' วัน</span>' : ''; }
+async function saveBackdays(){
+  var n = Number($('bd-days').value);
+  if (!(n >= 0 && n <= 90) || n !== Math.floor(n)) return toast('ใส่จำนวนวัน 0-90', 'bad');
+  await busy(async function(){ await q(sb.rpc('set_backdate_days', {p_days:n})); BACKDAYS = n; toast('บันทึกแล้ว: ลงย้อนหลังได้ ' + n + ' วัน'); });
 }
 // ---------- พิมพ์ในแอป ----------
 // ฟังก์ชันพิมพ์เดิมเขียน HTML ลงหน้าต่างใหม่ (window.open) ซึ่งในแอปบนหน้าจอโฮม iPhone และเบราว์เซอร์ในแอป LINE มักได้หน้าขาว
@@ -1353,7 +1379,8 @@ var T = null;
 function saveTxn(){ ls.set('txn_draft', {type:T.type, branch:T.branch, to:T.to, ref:T.ref, note:T.note, lines:T.lines, reason:T.reason}); }
 PAGES.txn = async function(){
   if (!T) T = Object.assign({type:'IN', branch:null, to:null, ref:'', note:'', lines:[]}, ls.get('txn_draft', {}));
-  T.date = isAdmin() ? (T.date || today()) : today(); T.bal = {};   // วันที่เอกสาร = วันนี้เสมอ (ผู้ดูแลเลือกย้อนหลังได้)
+  BACKDAYS = await loadBackdays(); if (curPage !== 'txn') return;
+  T.date = clampTxnDate(T.date || today()); T.bal = {};   // ลงย้อนหลังได้ไม่เกิน BACKDAYS วัน (ผู้ดูแลไม่จำกัด)
   if (!myBranches().some(function(b){ return b.id === T.branch; })) T.branch = S.cur;
   if (!isMgr()) T.type = 'OUT';   // พนักงานบันทึกได้เฉพาะจ่ายออก
   var fixed = 0;
@@ -1371,7 +1398,7 @@ function setTxnType(t){ if (!isMgr()) t = 'OUT'; readTxnHead(); T.type = t; save
 function readTxnHead(){
   if (!$('t-br')) return;
   T.branch = selNum('t-br'); T.to = $('t-to') ? selNum('t-to') : T.to;
-  T.date = isAdmin() && $('t-date') ? ($('t-date').value || today()) : today(); T.ref = $('t-ref').value.trim(); T.note = $('t-note').value.trim();
+  T.date = clampTxnDate($('t-date') ? $('t-date').value : today()); if ($('t-date')) $('t-date').value = T.date; T.ref = $('t-ref').value.trim(); T.note = $('t-note').value.trim();
 }
 function toOptions(){
   return '<option value="">— เลือกสาขาปลายทาง —</option>' + S.branches.filter(function(b){ return b.active && b.id !== T.branch; })
@@ -1384,8 +1411,8 @@ function renderTxn(){
     '<div class="card"><div class="row">' +
     '<label class="f">' + (T.type === 'TRANSFER' ? 'จากสาขา' : 'สาขา') + ' ' + branchSel('t-br', {value:T.branch}) + '</label>' +
     (T.type === 'TRANSFER' ? '<label class="f">ไปสาขา <select id="t-to">' + toOptions() + '</select></label>' : '') +
-    (isAdmin() ? '<label class="f">วันที่ (ผู้ดูแลเลือกย้อนหลังได้) <input type="date" id="t-date" value="' + T.date + '" max="' + today() + '"></label>'
-      : '<label class="f">วันที่ <input value="' + thDate(today()) + ' (วันนี้)" disabled title="ระบบลงวันที่เป็นวันที่บันทึกจริงเสมอ"></label>') +
+    '<label class="f">วันที่' + (isAdmin() ? '' : BACKDAYS ? ' <span class="sub">(ย้อนหลังได้ ' + BACKDAYS + ' วัน)</span>' : ' <span class="sub">(วันนี้เท่านั้น)</span>') +
+      ' <input type="date" id="t-date" value="' + T.date + '" max="' + today() + '"' + (isAdmin() ? '' : ' min="' + minTxnDate() + '"') + (!isAdmin() && !BACKDAYS ? ' disabled' : '') + '></label>' +
     '<label class="f">เลขที่อ้างอิง <input id="t-ref" value="' + esc(T.ref) + '" placeholder="' + (T.type === 'IN' ? 'เลขที่ใบส่งของ/ใบสั่งซื้อ' : 'ถ้ามี') + '"></label>' +
     '<label class="f grow">หมายเหตุ <input id="t-note" value="' + esc(T.note) + '"></label></div>' +
     (T.type === 'OUT' ? '<div class="row" style="margin-top:12px;align-items:center"><span class="sub">เหตุผล</span><div class="seg" style="margin:0" id="t-reason">' +
@@ -1486,7 +1513,7 @@ async function submitTxn(){
   var lines = use.map(function(l){ return {product_id:l.pid, unit_id:Number(l.unit_id), qty:Number(l.qty), unit_cost:(T.type !== 'IN' || l.cost === '' || l.cost == null) ? null : Number(l.cost)}; });
   await busy(async function(){
     var doc = await q(sb.rpc('post_stock_doc', {p_type:T.type, p_branch:T.branch, p_to_branch:T.type === 'TRANSFER' ? T.to : null,
-      p_doc_date:isAdmin() ? T.date : today(), p_ref:T.ref || null, p_note:T.note || null, p_lines:lines, p_reason:T.type === 'OUT' ? (T.reason || 'USE') : null}));
+      p_doc_date:T.date, p_ref:T.ref || null, p_note:T.note || null, p_lines:lines, p_reason:T.type === 'OUT' ? (T.reason || 'USE') : null}));
     T.lines = []; T.ref = ''; T.note = ''; T.date = today(); T.reason = 'USE'; saveTxn(); renderTxn();
     toast('บันทึกแล้ว เลขที่ ' + doc.doc_no); showDoc(doc.id);
   });
@@ -1772,7 +1799,7 @@ async function loadDocs(pg){
   var r = await qc(qb.order('id', {ascending:false}).range(pg * PAGE_SIZE, pg * PAGE_SIZE + PAGE_SIZE - 1));
   $h('d-res').innerHTML = '<table><tr><th>เลขที่</th><th>ประเภท</th><th>วันที่</th><th>สาขา</th><th>บันทึกโดย</th><th>อ้างอิง</th><th>หมายเหตุ</th></tr>' +
     (r.data.length ? r.data.map(function(d){
-      return '<tr class="click" onclick="showDoc(' + d.id + ')"><td><b>' + esc(d.doc_no) + '</b></td><td>' + badge(d.doc_type, d.cancelled, d.reason) + '</td><td>' + thDate(d.doc_date) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
+      return '<tr class="click" onclick="showDoc(' + d.id + ')"><td><b>' + esc(d.doc_no) + '</b></td><td>' + badge(d.doc_type, d.cancelled, d.reason) + '</td><td>' + thDate(d.doc_date) + backTag(d) + '</td><td>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') +
         '</td><td>' + esc(byName(d)) + '<div class="sub">' + thDateTime(d.created_at) + '</div></td><td>' + esc(d.ref_no || '') + '</td><td>' + esc(d.note || '') + '</td></tr>';
     }).join('') : '<tr><td colspan="7" class="empty">ไม่พบเอกสาร</td></tr>') + '</table>' + pager(r.count, pg, 'loadDocs');
 }
@@ -1802,7 +1829,7 @@ async function showDoc(id){
       return '<tr><td>' + (i + 1) + '</td><td><b>' + esc(p.sku) + '</b> ' + esc(p.name) + '</td>' + tail + '</tr>';
     }).join('');
     openModal('<h2>' + esc(d.doc_no) + ' ' + badge(d.doc_type, d.cancelled, d.reason) + '</h2>' +
-      '<dl class="dl"><dt>วันที่</dt><dd>' + thDate(d.doc_date) + '</dd><dt>สาขา</dt><dd>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</dd>' +
+      '<dl class="dl"><dt>วันที่</dt><dd>' + thDate(d.doc_date) + backTag(d) + '</dd><dt>สาขา</dt><dd>' + esc(bname(d.branch_id)) + (d.to_branch_id ? ' → ' + esc(bname(d.to_branch_id)) : '') + '</dd>' +
       (d.ref_no ? '<dt>อ้างอิง</dt><dd>' + esc(d.ref_no) + '</dd>' : '') + (d.note ? '<dt>หมายเหตุ</dt><dd>' + esc(d.note) + '</dd>' : '') +
       (d.doc_type === 'OUT' ? '<dt>เหตุผล</dt><dd>' + REASON[d.reason || 'USE'] + '</dd>' : '') +
       '<dt>' + (d.doc_type === 'IN' ? 'ผู้รับเข้า' : d.doc_type === 'OUT' ? 'ผู้จ่ายออก' : 'บันทึกโดย') + '</dt><dd><b>' + esc(byName(d)) + '</b> · ' + thDateTime(d.created_at) + '</dd>' +
@@ -2241,7 +2268,9 @@ PAGES.settings = async function(){
     html += '<div class="card"><h3>ผู้ใช้งาน</h3><div class="tbl-wrap" id="u-res"></div></div>';
     html += '<div class="card"><h3>สำรองข้อมูล</h3><p class="sub" id="bk-last" style="margin-top:-6px">กำลังตรวจสอบ...</p>' +
       '<p class="sub">ดาวน์โหลดข้อมูลทั้งหมดเป็นไฟล์ Excel ไฟล์เดียว (สาขา หน่วย หมวด สินค้า คงเหลือ เอกสาร รายการเคลื่อนไหว ตรวจนับ ผู้ใช้) เก็บไว้ในคอมหรือ Google Drive · แนะนำทุกสัปดาห์</p>' +
-      '<button class="btn pri" onclick="backupAll()">สำรองข้อมูลทั้งหมด (Excel)</button></div>';
+      '<button class="btn pri" onclick="backupAll()">สำรองข้อมูลทั้งหมด (Excel)</button></div>' +
+      '<div class="card"><h3>วันที่ในเอกสาร</h3><p class="sub">พนักงานและผู้จัดการลงวันที่ย้อนหลังได้ไม่เกินกี่วัน (0 = วันนี้เท่านั้น) · ผู้ดูแลระบบย้อนได้ไม่จำกัด · เอกสารที่ลงย้อนหลังจะมีป้ายสีส้มบอกไว้</p>' +
+      '<div class="row"><label class="f">ย้อนหลังได้ (วัน) <input id="bd-days" type="number" min="0" max="90" step="1" value="' + BACKDAYS + '" style="width:110px"></label><button class="btn pri" onclick="saveBackdays()">บันทึก</button></div></div>';
   }
   html += '<div class="cols2"><div class="card"><h3>หน่วยนับ</h3><div class="chips">' + S.units.map(function(u){ return '<span class="chip">' + esc(u.name) + '<button class="x" title="แก้ชื่อ" onclick="renameMaster(\'units\',' + u.id + ')">✎</button></span>'; }).join('') + '</div>' +
     '<div class="row" style="margin-top:12px"><input id="nu-name" class="grow" placeholder="ชื่อหน่วยใหม่"><button class="btn pri" onclick="addMaster(\'units\',\'nu-name\')">เพิ่ม</button></div></div>' +
@@ -2249,7 +2278,7 @@ PAGES.settings = async function(){
     '<div class="row" style="margin-top:12px"><input id="nc-name" class="grow" placeholder="ชื่อหมวดหมู่ใหม่"><button class="btn pri" onclick="addMaster(\'categories\',\'nc-name\')">เพิ่ม</button></div></div></div>';
   if (!SUPABASE_URL) html += '<div class="card"><h3>การเชื่อมต่อ</h3><p class="sub">เชื่อมต่ออยู่กับค่าที่บันทึกในเบราว์เซอร์นี้</p><button class="btn" onclick="if(confirm(\'ล้างการตั้งค่าการเชื่อมต่อ?\')){ls.del(\'stock_cfg\');logout().then(function(){location.reload()})}">เปลี่ยนการเชื่อมต่อ</button></div>';
   page(html);
-  if (isAdmin()) { lastBackupText().then(function(t){ if ($('bk-last')) $('bk-last').innerHTML = t; }); await loadUsers(); }
+  if (isAdmin()) { lastBackupText().then(function(t){ if ($('bk-last')) $('bk-last').innerHTML = t; }); loadBackdays().then(function(n){ BACKDAYS = n; if ($('bd-days')) $('bd-days').value = n; }); await loadUsers(); }
 };
 // ---------- สำรองข้อมูล ----------
 async function lastBackup(){
