@@ -150,6 +150,7 @@ input.qty:placeholder-shown{border-color:#f0b4ad;background:var(--bad-soft)}
 .dl dt{color:var(--muted)}
 .dl dd{margin:0}
 @media print{.side,.topbar{display:none}}
+tr.grp td{background:#f2f4f7;font-weight:600}tr.subt td{font-weight:700;background:#fafbfc}
 .tag-back{display:inline-block;font-size:11px;font-weight:600;color:#b54708;background:#fff4e5;border-radius:6px;padding:1px 6px;margin-left:4px;white-space:nowrap}
 /* หน้าพิมพ์ในแอป (แทนการเปิดหน้าต่างใหม่ ซึ่งในมือถือ/แอป LINE มักขึ้นหน้าขาว) */
 #pv-wrap{position:fixed;inset:0;z-index:9999;background:#fff;overflow:auto;-webkit-overflow-scrolling:touch}
@@ -380,8 +381,61 @@ function showPrint(html){
   wrap.innerHTML = '<div id="pv-bar"><span class="sp">' + esc(doc.title || 'พิมพ์') + '</span><button class="p" onclick="doPrint()">พิมพ์ / บันทึก PDF</button><button class="c" onclick="closePrint()">ปิด</button>' + warn + '</div><div id="pv-host"></div>';
   document.body.appendChild(wrap); document.body.classList.add('pv-on');
   var root = $('pv-host').attachShadow({mode:'open'});
-  root.innerHTML = '<style>:host{display:block;background:#fff;color:#000}.pvbody{display:block;background:#fff;color:#000;font-family:"IBM Plex Sans Thai",sans-serif}' + css + '</style><div class="pvbody">' + doc.body.innerHTML + '</div>';
-  if (!inAppBrowser()) (document.fonts ? document.fonts.ready : Promise.resolve()).then(function(){ setTimeout(doPrint, 350); });
+  var allCss = PV_BASE_CSS + css;
+  root.innerHTML = '<style>' + allCss + '</style><div class="pvbody"><p style="padding:24px;color:#667085">กำลังจัดหน้า...</p></div>';
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(function(){
+    var out = doc.body.innerHTML;
+    try { out = paginatePrint(allCss, out); } catch(e){ console.warn('paginate', e); }
+    if (!$('pv-host')) return;
+    root.innerHTML = '<style>' + allCss + '</style><div class="pvbody">' + out + '</div>';
+    if (!inAppBrowser()) setTimeout(doPrint, 350);
+  });
+}
+var PV_BASE_CSS = ':host{display:block;background:#fff;color:#000}.pvbody{display:block;background:#fff;color:#000;font-family:"IBM Plex Sans Thai",sans-serif}' +
+  '.pv-page{break-after:page;page-break-after:always}.pv-page:last-child{break-after:auto;page-break-after:auto}' +
+  '@media screen{.pv-page+.pv-page{border-top:2px dashed #c0c4cc;margin-top:18px;padding-top:18px}}';
+// แบ่งหน้าเอง: Safari บน iPhone ไม่พิมพ์หัวตารางซ้ำทุกหน้า จึงวัดความสูงแต่ละแถวที่ความกว้าง A4
+// แล้วตัดตารางเป็นช่วง ๆ ต่อหน้า โดยใส่หัวตารางให้ทุกหน้า
+function paginatePrint(css, html){
+  var PAGE_W = 700, PAGE_H = 940;   // พื้นที่พิมพ์ A4 (px ที่ 96dpi) เผื่อขอบ/หัวท้ายกระดาษของเบราว์เซอร์
+  var probe = document.createElement('div');
+  probe.style.cssText = 'position:absolute;left:-30000px;top:0;width:' + PAGE_W + 'px;visibility:hidden';
+  document.body.appendChild(probe);
+  try {
+    var r = probe.attachShadow({mode:'open'});
+    r.innerHTML = '<style>' + css + '</style><div class="pvbody">' + html + '</div>';
+    var body = r.querySelector('.pvbody'), bcs = getComputedStyle(body);
+    var budget = PAGE_H - (parseFloat(bcs.paddingTop) || 0) - (parseFloat(bcs.paddingBottom) || 0);
+    var pages = [[]], used = 0;
+    function newPage(){ pages.push([]); used = 0; }
+    function h(el){ return el.getBoundingClientRect().height; }
+    function isHead(row){ return row.parentNode.tagName === 'THEAD' || (row.cells.length && Array.prototype.every.call(row.cells, function(c){ return c.tagName === 'TH'; })); }
+    var kids = Array.prototype.slice.call(body.children), splitAny = false;
+    kids.forEach(function(el){
+      var cs = getComputedStyle(el), mt = parseFloat(cs.marginTop) || 0, mb = parseFloat(cs.marginBottom) || 0;
+      if (el.tagName === 'TABLE' && el.rows.length > 2) {
+        var rows = Array.prototype.slice.call(el.rows);
+        var head = rows.filter(isHead), foot = el.tFoot ? Array.prototype.slice.call(el.tFoot.rows) : [];
+        var main = rows.filter(function(x){ return head.indexOf(x) < 0 && foot.indexOf(x) < 0; });
+        var hh = head.reduce(function(a, x){ return a + h(x); }, 0), chunk = null;
+        function startChunk(){ chunk = el.cloneNode(false); head.forEach(function(x){ chunk.appendChild(x.cloneNode(true)); }); pages[pages.length - 1].push(chunk); used += hh + mt; }
+        if (main.length && used && used + mt + hh + h(main[0]) > budget) newPage();
+        startChunk();
+        main.concat(foot).forEach(function(x){
+          var rh = h(x);
+          if (used + rh > budget) { newPage(); startChunk(); splitAny = true; }
+          chunk.appendChild(x.cloneNode(true)); used += rh;
+        });
+        used += mb;
+      } else {
+        var eh = h(el) + mt + mb;
+        if (used && used + eh > budget) newPage();
+        pages[pages.length - 1].push(el.cloneNode(true)); used += eh;
+      }
+    });
+    if (pages.length < 2) return html;
+    return pages.map(function(nodes){ return '<div class="pv-page">' + nodes.map(function(n){ return n.outerHTML; }).join('') + '</div>'; }).join('');
+  } finally { probe.remove(); }
 }
 function doPrint(){ try { window.print(); } catch(e){ toast('เบราว์เซอร์นี้สั่งพิมพ์ไม่ได้ ลองเปิดใน Safari หรือ Chrome', 'bad'); } }
 function closePrint(){
@@ -2149,9 +2203,11 @@ var RPT = [];
 PAGES.report = async function(){
   page('<div class="ph"><h1>รายงานความเคลื่อนไหวสินค้า</h1></div>' +
     '<div class="card"><div class="row"><label class="f">สาขา ' + branchSel('r-br', {all:true}) + '</label>' +
+    '<label class="f">หมวดหมู่ <select id="r-cat" onchange="renderReport()">' + catOptions('', '— ทุกหมวด (แยกยอดตามหมวด) —') + '<option value="none">ไม่ระบุหมวด</option></select></label>' +
     '<label class="f">ตั้งแต่ <input type="date" id="r-from" value="' + monthStart() + '"></label><label class="f">ถึง <input type="date" id="r-to" value="' + today() + '"></label>' +
     '<button class="btn pri" onclick="runReport()">แสดงรายงาน</button><button class="btn" onclick="printReport()">พิมพ์</button><button class="btn" onclick="exportReport()">ส่งออก Excel</button><button class="btn" onclick="exportMoves(\'r\')">ส่งออกรายการเคลื่อนไหว</button></div>' +
     '<p class="sub">ยอดยกมา + รับเข้า − จ่ายออก = คงเหลือ (หน่วยฐาน) · รวมการโอน ปรับยอด ตรวจนับ และรายการยกเลิก' + (multiBranch() ? ' · "ทุกสาขา" = รวมทุกสาขาที่มีสิทธิ์ และไม่นับการโอนระหว่างสาขาในกลุ่มเป็นเข้า/ออก' : '') + '</p></div>' +
+    '<div class="card" id="r-sumcard"><h3 style="margin-top:0">สรุปตามหมวดหมู่</h3><div class="tbl-wrap" id="r-sum"></div></div>' +
     '<div class="card"><div class="tbl-wrap" id="r-res"></div></div>' +
     '<div class="card"><div class="ph" style="margin-bottom:8px"><h3 style="margin:0">ของเสีย / หมดอายุ / อื่น ๆ (จ่ายออกที่ไม่ใช่ "นำไปใช้")</h3><button class="btn" onclick="exportWaste()">ส่งออก Excel</button></div>' +
     '<div class="stats" id="w-sum"></div><div class="tbl-wrap" id="w-res"></div></div>');
@@ -2201,38 +2257,81 @@ async function runReport(){
       var adj = {}; tr.forEach(function(m){ var a = adj[m.product_id] || (adj[m.product_id] = {i:0, o:0}); if (m.qty_base > 0) a.i += Number(m.qty_base); else a.o -= Number(m.qty_base); });
       RPT.forEach(function(r){ var a = adj[r.product_id]; if (a) { r.qty_in = Number(r.qty_in) - a.i; r.qty_out = Number(r.qty_out) - a.o; } });
     }
-    var tot = RPT.reduce(function(s, r){ return s + Number(r.closing_value); }, 0);
-    $h('r-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หน่วย</th><th class="num">ยกมา</th><th class="num">รับเข้า</th><th class="num">จ่ายออก</th><th class="num">คงเหลือ</th><th class="num">มูลค่า (ทุน)</th></tr>' +
-      (RPT.length ? RPT.map(function(r){
-        return '<tr class="click" onclick="stockCard(' + r.product_id + ',' + (b || S.cur) + ')"><td><b>' + esc(r.sku) + '</b></td><td>' + esc(r.name) + '</td><td>' + esc(r.unit_name) + '</td><td class="num">' + num(r.opening) + '</td><td class="num okc">' + num(r.qty_in) +
-          '</td><td class="num low">' + num(r.qty_out) + '</td><td class="num"><b>' + num(r.closing) + '</b></td><td class="num">' + money(r.closing_value) + '</td></tr>';
-      }).join('') + '<tr><td colspan="7" class="num"><b>มูลค่ารวม</b></td><td class="num"><b>' + money(tot) + '</b></td></tr>'
-      : '<tr><td colspan="8" class="empty">ไม่มีความเคลื่อนไหวในช่วงนี้</td></tr>') + '</table>';
+    var prods = await fetchAll(function(){ return sb.from('products').select('id,category_id,cost').order('id'); });
+    var pm = {}; prods.forEach(function(p){ pm[p.id] = p; });
+    RPT.forEach(function(r){ var p = pm[r.product_id] || {};
+      r.cat_id = p.category_id || null; r.cat = r.cat_id && S.catMap[r.cat_id] ? S.catMap[r.cat_id].name : 'ไม่ระบุหมวด';
+      r.cost = Number(p.cost || 0); r.out_value = Number(r.qty_out) * r.cost; });
+    renderReport();
   });
+}
+// รายงานแยกตามหมวด: กรองตามหมวดที่เลือก เรียงตามหมวด แล้วตามรหัส
+function catOrder(id){ var i = S.cats.findIndex(function(c){ return c.id === id; }); return i < 0 ? 1e9 : i; }
+function reportView(){
+  var c = $('r-cat') ? $('r-cat').value : '';
+  return RPT.filter(function(r){ return !c || (c === 'none' ? !r.cat_id : String(r.cat_id) === c); })
+    .sort(function(a, b){ return catOrder(a.cat_id) - catOrder(b.cat_id) || String(a.sku).localeCompare(String(b.sku)); });
+}
+function reportGroups(rows){
+  var g = [], cur = null;
+  rows.forEach(function(r){ if (!cur || cur.cat !== r.cat) g.push(cur = {cat:r.cat, rows:[], value:0, outv:0}); cur.rows.push(r); cur.value += Number(r.closing_value); cur.outv += r.out_value; });
+  return g;
+}
+function renderReport(){
+  if (!$('r-res')) return;
+  var b = selNum('r-br'), rows = reportView(), groups = reportGroups(rows), one = $('r-cat').value !== '';
+  var tot = groups.reduce(function(s, g){ return s + g.value; }, 0), totOut = groups.reduce(function(s, g){ return s + g.outv; }, 0);
+  $('r-sumcard').style.display = one || !groups.length ? 'none' : '';
+  $h('r-sum').innerHTML = '<table><tr><th>หมวดหมู่</th><th class="num">รายการ</th><th class="num">มูลค่าจ่ายออก (ทุน)</th><th class="num">มูลค่าคงเหลือ (ทุน)</th></tr>' +
+    groups.map(function(g){ return '<tr><td><b>' + esc(g.cat) + '</b></td><td class="num">' + g.rows.length + '</td><td class="num">' + money(g.outv) + '</td><td class="num">' + money(g.value) + '</td></tr>'; }).join('') +
+    '<tr><td><b>รวมทุกหมวด</b></td><td class="num"><b>' + rows.length + '</b></td><td class="num"><b>' + money(totOut) + '</b></td><td class="num"><b>' + money(tot) + '</b></td></tr></table>';
+  var line = function(r){
+    return '<tr class="click" onclick="stockCard(' + r.product_id + ',' + (b || S.cur) + ')"><td><b>' + esc(r.sku) + '</b></td><td>' + esc(r.name) + '</td><td>' + esc(r.unit_name) + '</td><td class="num">' + num(r.opening) + '</td><td class="num okc">' + num(r.qty_in) +
+      '</td><td class="num low">' + num(r.qty_out) + '</td><td class="num"><b>' + num(r.closing) + '</b></td><td class="num">' + money(r.out_value) + '</td><td class="num">' + money(r.closing_value) + '</td></tr>';
+  };
+  $h('r-res').innerHTML = '<table><tr><th>รหัส</th><th>ชื่อสินค้า</th><th>หน่วย</th><th class="num">ยกมา</th><th class="num">รับเข้า</th><th class="num">จ่ายออก</th><th class="num">คงเหลือ</th><th class="num">มูลค่าจ่ายออก</th><th class="num">มูลค่าคงเหลือ</th></tr>' +
+    (rows.length ? groups.map(function(g){
+      return '<tr class="grp"><td colspan="9"><b>' + esc(g.cat) + '</b> <span class="sub">· ' + g.rows.length + ' รายการ</span></td></tr>' + g.rows.map(line).join('') +
+        '<tr class="subt"><td colspan="7" class="num">รวม ' + esc(g.cat) + '</td><td class="num">' + money(g.outv) + '</td><td class="num">' + money(g.value) + '</td></tr>';
+    }).join('') + (groups.length > 1 ? '<tr class="subt"><td colspan="7" class="num"><b>รวมทุกหมวด</b></td><td class="num"><b>' + money(totOut) + '</b></td><td class="num"><b>' + money(tot) + '</b></td></tr>' : '')
+    : '<tr><td colspan="9" class="empty">ไม่มีความเคลื่อนไหวในช่วงนี้</td></tr>') + '</table>';
 }
 function printReport(){
   if (!RPT.length) return toast('ไม่มีข้อมูลให้พิมพ์ กด "แสดงรายงาน" ก่อน', 'bad');
-  var b = selNum('r-br'), tot = 0;
-  var body = RPT.map(function(r, i){ tot += Number(r.closing_value);
-    return '<tr><td>' + (i + 1) + '</td><td>' + esc(r.sku) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.unit_name) + '</td><td class="n">' + num(r.opening) + '</td><td class="n">' + num(r.qty_in) +
-      '</td><td class="n">' + num(r.qty_out) + '</td><td class="n"><b>' + num(r.closing) + '</b></td><td class="n">' + money(r.closing_value) + '</td></tr>'; }).join('');
-  var w = printWin(); if (!w) return toast('เบราว์เซอร์บล็อกหน้าต่างพิมพ์ กรุณาอนุญาตป๊อปอัป', 'bad');
+  var b = selNum('r-br'), rows = reportView(), groups = reportGroups(rows), n = 0, catSel = $('r-cat').value;
+  if (!rows.length) return toast('ไม่มีรายการในหมวดนี้', 'bad');
+  var tot = groups.reduce(function(s, g){ return s + g.value; }, 0), totOut = groups.reduce(function(s, g){ return s + g.outv; }, 0);
+  var body = groups.map(function(g){
+    return '<tr class="grp"><td colspan="10">' + esc(g.cat) + ' · ' + g.rows.length + ' รายการ</td></tr>' + g.rows.map(function(r){ n++;
+      return '<tr><td>' + n + '</td><td>' + esc(r.sku) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.unit_name) + '</td><td class="n">' + num(r.opening) + '</td><td class="n">' + num(r.qty_in) +
+        '</td><td class="n">' + num(r.qty_out) + '</td><td class="n"><b>' + num(r.closing) + '</b></td><td class="n">' + money(r.out_value) + '</td><td class="n">' + money(r.closing_value) + '</td></tr>'; }).join('') +
+      '<tr class="subt"><td colspan="8" class="n">รวม ' + esc(g.cat) + '</td><td class="n">' + money(g.outv) + '</td><td class="n">' + money(g.value) + '</td></tr>';
+  }).join('') + (groups.length > 1 ? '<tr class="subt"><td colspan="8" class="n">รวมทุกหมวด</td><td class="n">' + money(totOut) + '</td><td class="n">' + money(tot) + '</td></tr>' : '');
+  var sum = groups.length > 1 ? '<table class="sum"><tr><th>หมวดหมู่</th><th class="n">รายการ</th><th class="n">มูลค่าจ่ายออก (ทุน)</th><th class="n">มูลค่าคงเหลือ (ทุน)</th></tr>' +
+    groups.map(function(g){ return '<tr><td>' + esc(g.cat) + '</td><td class="n">' + g.rows.length + '</td><td class="n">' + money(g.outv) + '</td><td class="n">' + money(g.value) + '</td></tr>'; }).join('') +
+    '<tr class="subt"><td>รวมทุกหมวด</td><td class="n">' + rows.length + '</td><td class="n">' + money(totOut) + '</td><td class="n">' + money(tot) + '</td></tr></table>' : '';
+  var w = printWin();
   w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>รายงานความเคลื่อนไหวสินค้า</title><style>' +
-    'body{font-family:Sarabun,Tahoma,sans-serif;font-size:13px;margin:0;padding:16px}h2{margin:2px 0 4px;font-size:18px}p{margin:0 0 10px}' +
-    'table{width:100%;border-collapse:collapse}th,td{border:1px solid #999;padding:4px 6px;line-height:1.5}th{background:#eee}td.n,th.n{text-align:right;white-space:nowrap}' +
-    'thead{display:table-header-group}tfoot{display:table-row-group}tr{page-break-inside:avoid;break-inside:avoid}' +
-    '@page{size:A4;margin:12mm}@media print{body{padding:0}th{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body>' +
+    'body{font-family:Sarabun,Tahoma,sans-serif;font-size:12.5px;margin:0;padding:16px}h2{margin:2px 0 4px;font-size:18px}p{margin:0 0 10px}' +
+    'table{width:100%;border-collapse:collapse}th,td{border:1px solid #999;padding:4px 5px;line-height:1.5}th{background:#eee}td.n,th.n{text-align:right;white-space:nowrap}' +
+    'table.sum{width:auto;min-width:60%;margin-bottom:14px}tr.grp td{background:#f3f4f6;font-weight:700}tr.subt td{font-weight:700;background:#fafafa}' +
+    'tr{page-break-inside:avoid;break-inside:avoid}' +
+    '@page{size:A4;margin:12mm}@media print{body{padding:0}th,tr.grp td,tr.subt td{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body>' +
     '<div style="font-weight:700;color:#a8231f">' + SHOP_NAME + '</div><h2>รายงานความเคลื่อนไหวสินค้า</h2>' +
-    '<p>สาขา ' + esc(b ? bname(b) : 'ทุกสาขา') + ' · ' + thDate($('r-from').value) + ' – ' + thDate($('r-to').value) + ' · หน่วยฐาน · พิมพ์เมื่อ ' + thDateTime(new Date()) + '</p>' +
-    '<table><thead><tr><th>#</th><th>รหัส</th><th>ชื่อสินค้า</th><th>หน่วย</th><th class="n">ยกมา</th><th class="n">รับเข้า</th><th class="n">จ่ายออก</th><th class="n">คงเหลือ</th><th class="n">มูลค่า (ทุน)</th></tr></thead>' +
-    '<tbody>' + body + '</tbody><tfoot><tr><td colspan="8" class="n"><b>มูลค่ารวม</b></td><td class="n"><b>' + money(tot) + '</b></td></tr></tfoot></table>' +
-    '<script>window.onload=function(){window.print()}<\/script></body></html>');
+    '<p>สาขา ' + esc(b ? bname(b) : 'ทุกสาขา') + ' · หมวด ' + esc(catSel ? groups[0].cat : 'ทุกหมวด') + ' · ' + thDate($('r-from').value) + ' – ' + thDate($('r-to').value) + ' · หน่วยฐาน · พิมพ์เมื่อ ' + thDateTime(new Date()) + '</p>' + sum +
+    '<table><thead><tr><th>#</th><th>รหัส</th><th>ชื่อสินค้า</th><th>หน่วย</th><th class="n">ยกมา</th><th class="n">รับเข้า</th><th class="n">จ่ายออก</th><th class="n">คงเหลือ</th><th class="n">มูลค่าจ่ายออก</th><th class="n">มูลค่าคงเหลือ</th></tr></thead>' +
+    '<tbody>' + body + '</tbody></table></body></html>');
   w.document.close();
 }
 function exportReport(){
-  exportXlsx(RPT.map(function(r){ return {'รหัส':r.sku, 'ชื่อสินค้า':r.name, 'หน่วย':r.unit_name, 'ยกมา':Number(r.opening), 'รับเข้า':Number(r.qty_in),
-    'จ่ายออก':Number(r.qty_out), 'คงเหลือ':Number(r.closing), 'มูลค่า':Number(r.closing_value)}; }),
-    'รายงาน', 'stock_report_' + $('r-from').value + '_' + $('r-to').value + '.xlsx');
+  var rows = reportView(), groups = reportGroups(rows);
+  if (!rows.length) return toast('ไม่มีข้อมูลให้ส่งออก', 'bad');
+  var wb = XLSX.utils.book_new();
+  xlsxAddSheet(wb, rows.map(function(r){ return {'หมวดหมู่':r.cat, 'รหัส':r.sku, 'ชื่อสินค้า':r.name, 'หน่วย':r.unit_name, 'ยกมา':Number(r.opening), 'รับเข้า':Number(r.qty_in),
+    'จ่ายออก':Number(r.qty_out), 'คงเหลือ':Number(r.closing), 'ต้นทุน/หน่วย':r.cost, 'มูลค่าจ่ายออก':+r.out_value.toFixed(2), 'มูลค่าคงเหลือ':Number(r.closing_value)}; }), 'รายงาน');
+  xlsxAddSheet(wb, groups.map(function(g){ return {'หมวดหมู่':g.cat, 'รายการ':g.rows.length, 'มูลค่าจ่ายออก':+g.outv.toFixed(2), 'มูลค่าคงเหลือ':+g.value.toFixed(2)}; })
+    .concat([{'หมวดหมู่':'รวมทุกหมวด', 'รายการ':rows.length, 'มูลค่าจ่ายออก':+groups.reduce(function(s, g){ return s + g.outv; }, 0).toFixed(2), 'มูลค่าคงเหลือ':+groups.reduce(function(s, g){ return s + g.value; }, 0).toFixed(2)}]), 'สรุปตามหมวด');
+  XLSX.writeFile(wb, 'stock_report_' + $('r-from').value + '_' + $('r-to').value + '.xlsx');
 }
 async function exportMoves(src){
   var b = selNum(src === 'r' ? 'r-br' : 'd-b');
